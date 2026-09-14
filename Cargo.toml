@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/optic-core"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/benoitjeanson/optic"
+authors = ["Benoit Jeanson", "Elias"]
+
+[workspace.dependencies]
+optic-core = { path = "crates/optic-core", version = "0.0.1" }
+serde = { version = "1", features = ["derive"] }
+approx = "0.5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+lto = "thin"
