@@ -5,7 +5,7 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Allow one deployment at a time, and let a newer push supersede an in-flight one.
+# One deployment at a time; a newer push supersedes an in-flight one.
 concurrency:
   group: pages
   cancel-in-progress: true
@@ -24,23 +24,27 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
-      - name: Compile the kernel to WebAssembly
-        run: cargo build -p optic-wasm --target wasm32-unknown-unknown --release
-
-      - name: Assemble the site
-        run: |
-          mkdir -p site
-          cp web/index.html web/style.css web/*.js site/
-          cp target/wasm32-unknown-unknown/release/optic_wasm.wasm site/
-          ls -la site
+      # Compiles the kernel to WebAssembly and stages it in web/, which is both what
+      # the smoke test loads and what gets published.
+      - name: Build the page
+        run: ./scripts/build-web.sh
 
       # The demo is the app, so it does not ship unless it actually runs.
-      - name: Smoke test the page
+      - name: Smoke test
         working-directory: tests/web
         run: |
           npm install --no-audit --no-fund
           node smoke.mjs
+
+      - name: Assemble the site
+        run: |
+          mkdir -p site
+          cp web/index.html web/style.css web/*.js web/optic_wasm.wasm site/
+          ls -la site
 
       - uses: actions/upload-pages-artifact@v3
         with:
