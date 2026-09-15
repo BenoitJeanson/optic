@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>optic — lens design in the browser</title>
+    <meta
+      name="description"
+      content="An open-source optical design kernel: sequential ray tracing, spot diagrams and first-order analysis, running entirely in your browser."
+    />
+    <link rel="stylesheet" href="style.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🔭</text></svg>"
+    />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <h1>optic</h1>
+        <p>Sequential ray tracing, running entirely in your browser.</p>
+      </div>
+      <label class="preset">
+        <span>System</span>
+        <select id="preset"></select>
+      </label>
+    </header>
+
+    <p id="error" class="error" hidden></p>
+
+    <main>
+      <section class="panel controls" aria-label="System definition">
+        <div class="grid">
+          <label>
+            <span>Entrance pupil (mm)</span>
+            <input id="epd" type="number" min="0.1" step="0.5" />
+          </label>
+          <label>
+            <span>Field angles (&deg;)</span>
+            <input id="fields" type="text" inputmode="decimal" />
+          </label>
+          <label class="wide">
+            <span>Wavelengths (&micro;m)</span>
+            <input id="wavelengths" type="text" inputmode="decimal" />
+          </label>
+        </div>
+
+        <div class="focus">
+          <label for="defocus">
+            <span>Defocus</span>
+            <output id="defocus-value">+0.00 mm</output>
+          </label>
+          <input id="defocus" type="range" min="-1.5" max="1.5" step="0.01" value="0" />
+          <button id="refocus" type="button">Refocus</button>
+        </div>
+
+        <table class="prescription">
+          <caption>
+            Prescription — edit any value and everything updates
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">#</th>
+              <th scope="col">Radius</th>
+              <th scope="col">Thickness</th>
+              <th scope="col">Glass</th>
+              <th scope="col">Semi-&#8960;</th>
+              <th scope="col">Stop</th>
+            </tr>
+          </thead>
+          <tbody id="prescription"></tbody>
+        </table>
+
+        <ul id="warnings" class="warnings" hidden></ul>
+      </section>
+
+      <section class="panel results" aria-label="Analysis">
+        <dl id="first-order" class="readout"></dl>
+        <figure class="layout">
+          <canvas id="layout" aria-label="Cross-section of the optical system with traced rays"></canvas>
+          <figcaption>Layout — rays at each field, drawn to scale</figcaption>
+        </figure>
+        <div id="spots" class="spots"></div>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        Every number here is computed by
+        <code>optic-core</code>, the same Rust kernel the desktop application uses,
+        compiled to WebAssembly. Nothing is sent to a server.
+      </p>
+      <p>
+        <a href="https://github.com/benoitjeanson/optic">Source on GitHub</a> ·
+        Apache-2.0
+      </p>
+    </footer>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

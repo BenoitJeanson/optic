@@ -69,3 +69,26 @@ jobs:
       # The kernel must stay free of anything that cannot reach the browser, because
       # the public demo is built from exactly this crate.
       - run: cargo build -p optic-core --target wasm32-unknown-unknown --release
+      - run: cargo build -p optic-wasm --target wasm32-unknown-unknown --release
+
+  demo:
+    name: browser demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build the page
+        run: ./scripts/build-web.sh
+      # Runs the real app.js against a real DOM, so a broken demo fails the build
+      # rather than greeting the next visitor.
+      - name: Smoke test
+        working-directory: tests/web
+        run: |
+          npm install --no-audit --no-fund
+          node smoke.mjs

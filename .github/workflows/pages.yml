@@ -1,0 +1,57 @@
+name: Deploy demo
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Allow one deployment at a time, and let a newer push supersede an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compile the kernel to WebAssembly
+        run: cargo build -p optic-wasm --target wasm32-unknown-unknown --release
+
+      - name: Assemble the site
+        run: |
+          mkdir -p site
+          cp web/index.html web/style.css web/*.js site/
+          cp target/wasm32-unknown-unknown/release/optic_wasm.wasm site/
+          ls -la site
+
+      # The demo is the app, so it does not ship unless it actually runs.
+      - name: Smoke test the page
+        working-directory: tests/web
+        run: |
+          npm install --no-audit --no-fund
+          node smoke.mjs
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

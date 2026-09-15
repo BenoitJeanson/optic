@@ -1,0 +1,8 @@
+{
+  "name": "optic-web-smoke",
+  "private": true,
+  "type": "module",
+  "description": "Headless smoke test for the browser demo.",
+  "scripts": { "test": "node smoke.mjs" },
+  "devDependencies": { "jsdom": "^25.0.1" }
+}

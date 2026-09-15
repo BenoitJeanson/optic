@@ -5,8 +5,17 @@ and lens optimisation, with a desktop application that a Zemax user can sit down
 of without retraining.
 
 **Status: early. Milestone 0 in progress.** The kernel traces real and paraxial rays
-through centred systems and differentiates them exactly. There is no optimiser and no UI
-yet. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for where this is going and why.
+through centred systems and differentiates them exactly. There is no optimiser and no
+desktop application yet. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for where this
+is going and why.
+
+## Try it in your browser
+
+The kernel compiles to WebAssembly, so the demo runs entirely on your machine with
+nothing installed and nothing sent to a server: **https://benoitjeanson.github.io/optic/**
+
+Edit a radius, drag the defocus slider, switch between the built-in systems, and the
+layout, spot diagrams and first-order data update as you type.
 
 ## What works today
 
@@ -15,17 +24,21 @@ yet. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for where this is going an
 - Sellmeier, Schott, model-glass and fixed-index dispersion, with a small verified catalog
 - **Exact derivatives** of any traced quantity with respect to any design parameter,
   from a single trace, via forward-mode automatic differentiation
+- Spot diagrams, scale layout drawings with vignetting shown, and a browser demo
 
 ## Try it
 
 ```bash
 cargo run --release --example report   # first-order data and spot sizes for the samples
-cargo test                             # the verification suite
+cargo test --workspace                 # the verification suite
+
+./scripts/build-web.sh                 # build the demo
+python3 -m http.server -d web 8080     # then open http://localhost:8080
 ```
 
 ## Verification
 
-104 tests, in two layers. **Unit tests** live beside the code they cover, one module at a
+125 tests, in two layers. **Unit tests** live beside the code they cover, one module at a
 time, and can reach private functions: dual-number calculus, vector and transform algebra,
 dispersion formulae, sag and intersection geometry, the paraxial marching step, and the
 tracer's refraction, reflection, clipping and path-length bookkeeping. **Integration
@@ -53,8 +66,23 @@ The third-order convergence result is the load-bearing one: halving both apertur
 field divides the real-versus-paraxial disagreement by eight, which is what aberration
 theory demands and which nothing but a correct tracer will produce.
 
-CI runs the suite on Linux, macOS and Windows, with and without default features, plus
+The demo has its own headless smoke test (`tests/web`), which runs the real `app.js`
+against a real DOM. It catches what unit tests cannot: a mistyped element id, a listener
+on the wrong event, a canvas that never gets drawn. The demo does not deploy unless it
+passes.
+
+CI runs everything on Linux, macOS and Windows, with and without default features, plus
 formatting, clippy, a minimum-supported-Rust-version check, and a WebAssembly build.
+
+## Layout
+
+```
+crates/optic-core    the kernel: geometry, materials, tracing, paraxial optics
+crates/optic-wasm    a JSON analysis API over it, and the C ABI the browser calls
+web/                 the demo page -- plain ES modules, no build step
+tests/web            headless smoke test for the page
+docs/                architecture and decisions
+```
 
 ## Licence
 
