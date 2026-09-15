@@ -5,9 +5,12 @@ members = ["crates/optic-core", "crates/optic-wasm"]
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.75"
+# Measured, not guessed: `cargo check --workspace --all-features` passes on 1.78 and the
+# CI job re-checks it on every push. The binding constraint is Cargo.lock's v4 format,
+# which older toolchains cannot parse; the code itself and every dependency need less.
+rust-version = "1.78"
 license = "Apache-2.0"
-repository = "https://github.com/benoitjeanson/optic"
+repository = "https://github.com/BenoitJeanson/optic"
 authors = ["Benoit Jeanson", "Elias"]
 
 [workspace.dependencies]

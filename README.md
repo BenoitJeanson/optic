@@ -28,6 +28,8 @@ layout, spot diagrams and first-order data update as you type.
 
 ## Try it
 
+Requires Rust 1.78 or newer.
+
 ```bash
 cargo run --release --example report   # first-order data and spot sizes for the samples
 cargo test --workspace                 # the verification suite
