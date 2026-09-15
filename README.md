@@ -1,5 +1,9 @@
 # optic
 
+[![CI](https://github.com/BenoitJeanson/optic/actions/workflows/ci.yml/badge.svg)](https://github.com/BenoitJeanson/optic/actions/workflows/ci.yml)
+[![Demo](https://github.com/BenoitJeanson/optic/actions/workflows/pages.yml/badge.svg)](https://benoitjeanson.github.io/optic/)
+[![Licence](https://img.shields.io/badge/licence-Apache--2.0-blue.svg)](LICENSE)
+
 An open-source optical design environment: sequential ray tracing, aberration analysis
 and lens optimisation, with a desktop application that a Zemax user can sit down in front
 of without retraining.
