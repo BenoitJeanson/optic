@@ -231,3 +231,122 @@ impl<S: Scalar> System<S> {
         self.surfaces[i].material.is_reflective()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::material::catalog;
+
+    fn doublet() -> System<f64> {
+        System::new(
+            Object::Infinity,
+            vec![
+                Surface::new(50.0, 4.0, catalog::N_BK7),
+                Surface::new(-30.0, 2.0, catalog::F2).stop(),
+                Surface::new(-80.0, 90.0, Material::Vacuum),
+                Surface::plane(0.0, Material::Vacuum).labelled("image"),
+            ],
+        )
+    }
+
+    #[test]
+    fn vertices_accumulate_the_thicknesses() {
+        assert_eq!(doublet().vertices(), vec![0.0, 4.0, 6.0, 96.0]);
+    }
+
+    #[test]
+    fn transforms_place_each_vertex_on_the_axis() {
+        let sys = doublet();
+        let t = sys.transforms();
+        assert_eq!(t.len(), sys.surfaces.len());
+        for (x, z) in t.iter().zip(sys.vertices()) {
+            assert_eq!(x.point_to_global(crate::math::Vec3::zero()).z, z);
+            assert!(x.is_identity_rotation(), "centred systems must not rotate");
+        }
+    }
+
+    #[test]
+    fn a_surface_owns_the_medium_that_follows_it() {
+        let sys = doublet();
+        assert_eq!(sys.medium_before(0), &Material::Vacuum); // object space
+        assert_eq!(sys.medium_after(0), &catalog::N_BK7);
+        assert_eq!(sys.medium_before(1), &catalog::N_BK7);
+        assert_eq!(sys.medium_after(1), &catalog::F2);
+        assert_eq!(sys.medium_before(2), &catalog::F2);
+        assert_eq!(sys.medium_after(2), &Material::Vacuum);
+    }
+
+    #[test]
+    fn the_object_medium_is_configurable() {
+        let mut sys = doublet();
+        sys.object_medium = Material::Fixed { n: 1.33 };
+        assert_eq!(sys.medium_before(0), &Material::Fixed { n: 1.33 });
+    }
+
+    #[test]
+    fn the_stop_and_the_image_are_located_by_index() {
+        let sys = doublet();
+        assert_eq!(sys.stop_index(), Some(1));
+        assert_eq!(sys.image_index(), 3);
+
+        let mut no_stop = doublet();
+        no_stop.surfaces[1].is_stop = false;
+        assert_eq!(no_stop.stop_index(), None);
+    }
+
+    #[test]
+    fn plane_surfaces_really_are_planar() {
+        let s = Surface::<f64>::plane(3.0, Material::Vacuum);
+        assert!(matches!(s.profile, crate::surface::Profile::Plane));
+        assert_eq!(s.thickness, 3.0);
+        assert!(!s.is_stop);
+        assert_eq!(s.semi_diameter, None);
+    }
+
+    #[test]
+    fn builders_are_chainable_and_do_not_disturb_each_other() {
+        let s = Surface::<f64>::new(10.0, 1.0, Material::Vacuum)
+            .stop()
+            .labelled("aperture")
+            .with_semi_diameter(4.5);
+        assert!(s.is_stop);
+        assert_eq!(s.label, "aperture");
+        assert_eq!(s.semi_diameter, Some(4.5));
+
+        let sys = doublet()
+            .titled("test")
+            .with_aperture(Aperture::ImageSpaceFNumber(2.8))
+            .with_fields(vec![Field::angle(0.0), Field::angle(10.0)])
+            .with_wavelengths(vec![Wavelength::new(0.6)]);
+        assert_eq!(sys.title, "test");
+        assert_eq!(sys.aperture, Aperture::ImageSpaceFNumber(2.8));
+        assert_eq!(sys.fields.len(), 2);
+        assert_eq!(sys.wavelengths.len(), 1);
+    }
+
+    #[test]
+    fn a_fresh_system_has_sensible_defaults() {
+        let sys = doublet();
+        assert_eq!(sys.wavelengths.len(), 1);
+        assert_eq!(sys.wavelengths[0].um, crate::material::lines::D);
+        assert_eq!(sys.wavelengths[0].weight, 1.0);
+        assert_eq!(sys.fields, vec![Field::angle(0.0)]);
+        assert_eq!(sys.object_medium, Material::Vacuum);
+    }
+
+    #[test]
+    fn field_radius_is_measured_from_the_axis() {
+        assert_eq!(Field::Angle { x: 3.0, y: 4.0 }.radius(), 5.0);
+        assert_eq!(Field::Height { x: -3.0, y: 4.0 }.radius(), 5.0);
+        assert_eq!(Field::angle(7.0).radius(), 7.0);
+        assert_eq!(Field::height(0.0).radius(), 0.0);
+    }
+
+    #[test]
+    fn reflectivity_is_read_from_the_following_medium() {
+        let mut sys = doublet();
+        assert!(!sys.is_reflective_at(0));
+        sys.surfaces[0].material = Material::Mirror;
+        assert!(sys.is_reflective_at(0));
+    }
+}

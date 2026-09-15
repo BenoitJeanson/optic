@@ -25,7 +25,14 @@ cargo test                             # the verification suite
 
 ## Verification
 
-The kernel is checked against closed forms and physical invariants, not against itself:
+104 tests, in two layers. **Unit tests** live beside the code they cover, one module at a
+time, and can reach private functions: dual-number calculus, vector and transform algebra,
+dispersion formulae, sag and intersection geometry, the paraxial marching step, and the
+tracer's refraction, reflection, clipping and path-length bookkeeping. **Integration
+tests** in `tests/` exercise whole systems.
+
+Both layers are checked against closed forms and physical invariants, not against the
+kernel's own past output:
 
 | Check | Result |
 |---|---|
@@ -36,10 +43,18 @@ The kernel is checked against closed forms and physical invariants, not against 
 | Lagrange invariant across the system | conserved to 1e-10 relative |
 | Real vs. paraxial rays as aperture and field shrink | converges at exactly third order |
 | Autodiff gradients vs. central differences | agree to 1e-5 relative |
+| Thin lens vs. the lensmaker's equation | 4 configurations, to 1e-9 |
+| Concave mirror focal length vs. `R/2` | to 1e-10 |
+| Plane-parallel plate displacement vs. `t(tan A - tan A')` | to 1e-12 |
+| A chief ray aimed at the entrance pupil | crosses the axis at the stop, to 1e-12 |
+| Paraxial trace reversed through `backward` | returns the launch state, to 1e-12 |
 
 The third-order convergence result is the load-bearing one: halving both aperture and
 field divides the real-versus-paraxial disagreement by eight, which is what aberration
 theory demands and which nothing but a correct tracer will produce.
+
+CI runs the suite on Linux, macOS and Windows, with and without default features, plus
+formatting, clippy, a minimum-supported-Rust-version check, and a WebAssembly build.
 
 ## Licence
 

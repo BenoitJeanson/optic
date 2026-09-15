@@ -227,3 +227,158 @@ impl<const N: usize> Scalar for Dual<N> {
         self.chain(self.re.powi(n), n as f64 * self.re.powi(n - 1))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Derivatives of `f` at `x`, compared against a hand-written derivative.
+    fn check(x0: f64, f: impl Fn(Dual<1>) -> Dual<1>, value: f64, deriv: f64) {
+        let y = f(Dual::<1>::variable(x0, 0));
+        assert!((y.re - value).abs() < 1e-12, "value {} vs {value}", y.re);
+        assert!(
+            (y.grad()[0] - deriv).abs() < 1e-11,
+            "derivative {} vs {deriv}",
+            y.grad()[0]
+        );
+    }
+
+    #[test]
+    fn a_constant_has_no_derivative() {
+        let c = Dual::<3>::constant(4.0);
+        assert_eq!(c.re, 4.0);
+        assert_eq!(c.du, [0.0; 3]);
+    }
+
+    #[test]
+    fn a_variable_is_seeded_in_exactly_one_slot() {
+        let v = Dual::<3>::variable(2.5, 1);
+        assert_eq!(v.re, 2.5);
+        assert_eq!(v.du, [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn seeding_past_the_end_is_rejected() {
+        let _ = Dual::<2>::variable(1.0, 2);
+    }
+
+    #[test]
+    fn sum_and_difference_are_linear() {
+        let (x, y) = (Dual::<2>::variable(3.0, 0), Dual::<2>::variable(5.0, 1));
+        assert_eq!((x + y).du, [1.0, 1.0]);
+        assert_eq!((x - y).du, [1.0, -1.0]);
+        assert_eq!((x + y).re, 8.0);
+        assert_eq!((-x).du, [-1.0, 0.0]);
+    }
+
+    #[test]
+    fn product_rule() {
+        let (x, y) = (Dual::<2>::variable(3.0, 0), Dual::<2>::variable(5.0, 1));
+        let p = x * y;
+        assert_eq!(p.re, 15.0);
+        assert_eq!(p.du, [5.0, 3.0]); // d(xy)/dx = y, d(xy)/dy = x
+    }
+
+    #[test]
+    fn quotient_rule() {
+        let (x, y) = (Dual::<2>::variable(3.0, 0), Dual::<2>::variable(5.0, 1));
+        let q = x / y;
+        assert!((q.re - 0.6).abs() < 1e-15);
+        assert!((q.du[0] - 1.0 / 5.0).abs() < 1e-15);
+        assert!((q.du[1] + 3.0 / 25.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn assignment_operators_agree_with_their_binary_forms() {
+        let (x, y) = (Dual::<2>::variable(1.5, 0), Dual::<2>::variable(-0.5, 1));
+
+        let mut t = x;
+        t += y;
+        assert_eq!((t.re, t.du), ((x + y).re, (x + y).du));
+
+        let mut t = x;
+        t -= y;
+        assert_eq!((t.re, t.du), ((x - y).re, (x - y).du));
+
+        let mut t = x;
+        t *= y;
+        assert_eq!((t.re, t.du), ((x * y).re, (x * y).du));
+
+        let mut t = x;
+        t /= y;
+        assert_eq!((t.re, t.du), ((x / y).re, (x / y).du));
+    }
+
+    #[test]
+    fn ordering_looks_only_at_the_real_part() {
+        // Two values that are equal but depend on different variables must compare
+        // equal: every branch in the tracer is a question about magnitude.
+        let a = Dual::<2>::variable(1.0, 0);
+        let b = Dual::<2>::variable(1.0, 1);
+        assert_eq!(a, b);
+        assert_eq!(a.partial_cmp(&b), Some(core::cmp::Ordering::Equal));
+        assert!(Dual::<2>::constant(0.5) < a);
+    }
+
+    #[test]
+    fn transcendentals_match_their_derivatives() {
+        let x0 = 0.7;
+        check(x0, |x| x.sqrt(), x0.sqrt(), 0.5 / x0.sqrt());
+        check(x0, |x| x.sin(), x0.sin(), x0.cos());
+        check(x0, |x| x.cos(), x0.cos(), -x0.sin());
+        check(x0, |x| x.tan(), x0.tan(), 1.0 + x0.tan().powi(2));
+        check(x0, |x| x.asin(), x0.asin(), 1.0 / (1.0 - x0 * x0).sqrt());
+        check(x0, |x| x.acos(), x0.acos(), -1.0 / (1.0 - x0 * x0).sqrt());
+        check(x0, |x| x.powi(3), x0.powi(3), 3.0 * x0 * x0);
+        check(x0, |x| x.powi(-2), x0.powi(-2), -2.0 * x0.powi(-3));
+    }
+
+    #[test]
+    fn powi_zero_is_a_constant() {
+        let y = Dual::<1>::variable(3.0, 0).powi(0);
+        assert_eq!(y.re, 1.0);
+        assert_eq!(y.du, [0.0]);
+    }
+
+    #[test]
+    fn abs_flips_the_derivative_below_zero() {
+        assert_eq!(Dual::<1>::variable(-2.0, 0).abs().du, [-1.0]);
+        assert_eq!(Dual::<1>::variable(2.0, 0).abs().du, [1.0]);
+    }
+
+    #[test]
+    fn atan2_differentiates_in_both_arguments() {
+        let (y0, x0) = (1.3, -2.1);
+        let y = Dual::<2>::variable(y0, 0);
+        let x = Dual::<2>::variable(x0, 1);
+        let a = y.atan2(x);
+        let r2 = x0 * x0 + y0 * y0;
+        assert!((a.re - y0.atan2(x0)).abs() < 1e-15);
+        assert!((a.du[0] - x0 / r2).abs() < 1e-14);
+        assert!((a.du[1] + y0 / r2).abs() < 1e-14);
+    }
+
+    #[test]
+    fn derivatives_compose_through_several_operations() {
+        // f(x) = sqrt(x) sin(x) / (1 + x^2)
+        let x0 = 1.7;
+        let (s, c, r) = (x0.sin(), x0.cos(), x0.sqrt());
+        let d = 1.0 + x0 * x0;
+        check(
+            x0,
+            |x| x.sqrt() * x.sin() / (Dual::constant(1.0) + x.powi(2)),
+            r * s / d,
+            ((0.5 / r * s + r * c) * d - r * s * 2.0 * x0) / (d * d),
+        );
+    }
+
+    #[test]
+    fn independent_variables_stay_independent() {
+        // A function of only x must report exactly zero sensitivity to y.
+        let x = Dual::<2>::variable(2.0, 0);
+        let y = x.sin() * x.sqrt();
+        assert_eq!(y.du[1], 0.0);
+        assert!(y.du[0] != 0.0);
+    }
+}

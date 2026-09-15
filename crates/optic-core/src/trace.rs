@@ -193,3 +193,268 @@ pub fn launch<S: Scalar>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::material::{lines, Material};
+    use crate::system::{Aperture, Surface};
+
+    const N_PLATE: f64 = 1.5;
+    const T_PLATE: f64 = 8.0;
+
+    /// A plane-parallel plate in vacuum, with the image plane 20 mm past it.
+    fn plate(n: f64) -> System<f64> {
+        System::new(
+            Object::Infinity,
+            vec![
+                Surface::plane(T_PLATE, Material::Fixed { n }).stop(),
+                Surface::plane(20.0, Material::Vacuum),
+                Surface::plane(0.0, Material::Vacuum),
+            ],
+        )
+        .with_aperture(Aperture::EntrancePupilDiameter(4.0))
+    }
+
+    fn ray_at(theta: f64) -> Ray<f64> {
+        Ray::new(
+            Vec3::new(0.0, 0.0, -5.0),
+            Vec3::new(0.0, theta.sin(), theta.cos()),
+        )
+    }
+
+    #[test]
+    fn a_new_ray_is_normalised() {
+        let r = Ray::new(Vec3::zero(), Vec3::new(0.0, 3.0, 4.0));
+        assert!((r.dir.norm() - 1.0).abs() < 1e-15);
+        assert!((r.dir - Vec3::new(0.0, 0.6, 0.8)).norm() < 1e-15);
+        assert_eq!(r.opl, 0.0);
+    }
+
+    #[test]
+    fn a_plate_displaces_a_ray_without_deviating_it() {
+        // Closed form: the emergent ray is parallel to the incident one, and the
+        // transverse offset is t (tan A - tan A'), with A' from Snell's law.
+        let sys = plate(N_PLATE);
+        for theta in [0.1f64, 0.3, 0.5] {
+            let start = ray_at(theta);
+            let traced = trace(&sys, lines::D, start);
+            assert!(traced.is_complete());
+
+            let exit = traced.hits.last().unwrap();
+            assert!(
+                (exit.dir - start.dir).norm() < 1e-14,
+                "the plate deviated the ray at {theta} rad"
+            );
+
+            let theta_p = (theta.sin() / N_PLATE).asin();
+            let undeviated = 33.0 * theta.tan();
+            let expected = undeviated - T_PLATE * (theta.tan() - theta_p.tan());
+            let got = traced.image_point().unwrap().y;
+            assert!((got - expected).abs() < 1e-12, "{got} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn a_plate_of_unit_index_does_nothing_at_all() {
+        let traced = trace(&plate(1.0), lines::D, ray_at(0.4));
+        let expected = 33.0 * 0.4f64.tan();
+        assert!((traced.image_point().unwrap().y - expected).abs() < 1e-13);
+    }
+
+    #[test]
+    fn optical_path_length_counts_each_medium_at_its_own_index() {
+        let traced = trace(&plate(N_PLATE), lines::D, ray_at(0.0));
+        // 5 mm of vacuum, 8 mm of glass, then 20 mm of vacuum.
+        let expected = 5.0 + N_PLATE * T_PLATE + 20.0;
+        let got = traced.hits.last().unwrap().opl;
+        assert!((got - expected).abs() < 1e-13, "OPL {got} vs {expected}");
+
+        // It must accumulate monotonically, surface by surface.
+        let mut previous = 0.0;
+        for h in &traced.hits {
+            assert!(h.opl > previous);
+            previous = h.opl;
+        }
+    }
+
+    #[test]
+    fn angles_of_incidence_are_recorded() {
+        let theta = 0.4;
+        let traced = trace(&plate(N_PLATE), lines::D, ray_at(theta));
+        assert!((traced.hits[0].incidence - theta).abs() < 1e-14);
+        // Leaving the plate, the internal angle is the refracted one.
+        let theta_p = (theta.sin() / N_PLATE).asin();
+        assert!((traced.hits[1].incidence - theta_p).abs() < 1e-14);
+        assert!((traced.hits[0].incidence - 0.0).abs() > 1e-9);
+    }
+
+    #[test]
+    fn total_internal_reflection_stops_the_ray() {
+        // Starting inside a dense medium, past the critical angle of 33.7 degrees.
+        let mut sys: System<f64> = System::new(
+            Object::Infinity,
+            vec![
+                Surface::plane(10.0, Material::Vacuum).stop(),
+                Surface::plane(0.0, Material::Vacuum),
+            ],
+        );
+        sys.object_medium = Material::Fixed { n: 1.8 };
+
+        let steep = trace(&sys, lines::D, ray_at(0.785)); // 45 degrees
+        assert_eq!(
+            steep.blocked,
+            Some((0, MissReason::TotalInternalReflection))
+        );
+        assert!(!steep.is_complete());
+        assert!(steep.image_point().is_none());
+        assert!(
+            steep.hits.is_empty(),
+            "no hit is recorded for a blocked surface"
+        );
+
+        let shallow = trace(&sys, lines::D, ray_at(0.3)); // 17 degrees, well under
+        assert!(shallow.is_complete());
+    }
+
+    #[test]
+    fn a_clear_aperture_blocks_what_falls_outside_it() {
+        let mut sys = plate(N_PLATE);
+        sys.surfaces[0].semi_diameter = Some(1.0);
+
+        let inside = trace(
+            &sys,
+            lines::D,
+            Ray::new(Vec3::new(0.0, 0.5, -5.0), Vec3::axis()),
+        );
+        assert!(inside.is_complete());
+
+        let outside = trace(
+            &sys,
+            lines::D,
+            Ray::new(Vec3::new(0.0, 5.0, -5.0), Vec3::axis()),
+        );
+        assert_eq!(outside.blocked, Some((0, MissReason::ClippedByAperture)));
+
+        // Hits before the blocking surface are still reported, for footprint plots.
+        sys.surfaces[0].semi_diameter = None;
+        sys.surfaces[1].semi_diameter = Some(1.0);
+        let late = trace(
+            &sys,
+            lines::D,
+            Ray::new(Vec3::new(0.0, 5.0, -5.0), Vec3::axis()),
+        );
+        assert_eq!(late.blocked, Some((1, MissReason::ClippedByAperture)));
+        assert_eq!(late.hits.len(), 1);
+    }
+
+    #[test]
+    fn a_flat_mirror_reverses_an_axial_ray() {
+        let sys: System<f64> = System::new(
+            Object::Infinity,
+            vec![
+                Surface::plane(-10.0, Material::Mirror).stop(),
+                Surface::plane(0.0, Material::Vacuum),
+            ],
+        );
+        let traced = trace(
+            &sys,
+            lines::D,
+            Ray::new(Vec3::new(0.0, 2.0, -5.0), Vec3::axis()),
+        );
+        assert!(traced.is_complete());
+        assert_eq!(traced.hits[0].dir.value(), [0.0, 0.0, -1.0]);
+        // Reflected straight back, the ray returns to the height it arrived at.
+        assert!((traced.image_point().unwrap().y - 2.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn launching_from_infinity_sets_the_direction_from_the_field_angle() {
+        let sys = crate::samples::cooke_triplet::<f64>();
+        let par = Paraxial::compute(&sys, lines::D);
+
+        let r = launch(&sys, &par, Field::Angle { x: 0.0, y: 10.0 }, 0.0, 0.0);
+        let expected = Vec3::new(0.0, 10f64.to_radians().tan(), 1.0).normalized();
+        assert!((r.dir - expected).norm() < 1e-15);
+        // The pupil centre, at the entrance pupil plane.
+        assert_eq!(r.pos.value(), [0.0, 0.0, par.ep_z]);
+
+        // Normalised pupil coordinates span the pupil diameter.
+        let edge = launch(&sys, &par, Field::angle(0.0), 0.0, 1.0);
+        assert!((edge.pos.y - par.epd / 2.0).abs() < 1e-15);
+        let corner = launch(&sys, &par, Field::angle(0.0), -1.0, 0.0);
+        assert!((corner.pos.x + par.epd / 2.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn launching_from_a_finite_object_aims_from_the_object_point() {
+        let sys: System<f64> = System::new(
+            Object::Finite { distance: 200.0 },
+            vec![
+                Surface::new(60.0, 5.0, Material::Fixed { n: 1.5 }).stop(),
+                Surface::new(-60.0, 100.0, Material::Vacuum),
+                Surface::plane(0.0, Material::Vacuum),
+            ],
+        )
+        .with_aperture(Aperture::EntrancePupilDiameter(10.0))
+        .with_fields(vec![Field::height(-8.0)]);
+
+        let par = Paraxial::compute(&sys, lines::D);
+        let r = launch(&sys, &par, Field::Height { x: 0.0, y: -8.0 }, 0.0, 1.0);
+        assert_eq!(r.pos.value(), [0.0, -8.0, -200.0]);
+
+        // It must point at the top of the entrance pupil.
+        let target = Vec3::new(0.0, par.epd / 2.0, par.ep_z);
+        assert!(r.dir.cross(target - r.pos).norm() < 1e-14);
+        assert!(trace(&sys, lines::D, r).is_complete());
+    }
+
+    #[test]
+    fn rays_are_traced_through_each_surfaces_own_frame() {
+        // Every hit records its local point; on a centred system that differs from the
+        // global point by exactly the vertex position.
+        let sys = crate::samples::cooke_triplet::<f64>();
+        let par = Paraxial::compute(&sys, lines::D);
+        let traced = trace(
+            &sys,
+            lines::D,
+            launch(&sys, &par, Field::angle(10.0), 0.3, 0.4),
+        );
+        for (h, z) in traced.hits.iter().zip(sys.vertices()) {
+            assert!((h.global.z - h.local.z - z).abs() < 1e-12);
+            assert_eq!(h.global.x, h.local.x);
+            assert_eq!(h.global.y, h.local.y);
+        }
+    }
+
+    #[test]
+    fn every_hit_direction_is_a_unit_vector() {
+        let sys = crate::samples::cooke_triplet::<f64>();
+        let par = Paraxial::compute(&sys, lines::D);
+        for (px, py) in [(0.0, 0.0), (0.9, 0.0), (-0.5, 0.6)] {
+            let traced = trace(
+                &sys,
+                lines::D,
+                launch(&sys, &par, Field::angle(14.0), px, py),
+            );
+            for h in &traced.hits {
+                assert!((h.dir.norm() - 1.0).abs() < 1e-14, "surface {}", h.surface);
+            }
+        }
+    }
+
+    #[test]
+    fn a_traced_ray_reports_one_hit_per_surface() {
+        let sys = crate::samples::cooke_triplet::<f64>();
+        let par = Paraxial::compute(&sys, lines::D);
+        let traced = trace(
+            &sys,
+            lines::D,
+            launch(&sys, &par, Field::angle(0.0), 0.0, 0.5),
+        );
+        assert_eq!(traced.hits.len(), sys.surfaces.len());
+        for (i, h) in traced.hits.iter().enumerate() {
+            assert_eq!(h.surface, i);
+        }
+    }
+}

@@ -186,3 +186,103 @@ pub mod catalog {
             .map(|(_, m, ..)| (*m).clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trivial_media_have_unit_index() {
+        assert_eq!(Material::Vacuum.index(lines::D), 1.0);
+        assert_eq!(Material::Vacuum.index(0.4), 1.0);
+        assert_eq!(Material::Mirror.index(lines::D), 1.0);
+        assert_eq!(Material::Fixed { n: 1.7 }.index(0.3), 1.7);
+    }
+
+    #[test]
+    fn only_a_mirror_reflects() {
+        assert!(Material::Mirror.is_reflective());
+        for m in [Material::Vacuum, Material::Air, Material::Fixed { n: 2.0 }] {
+            assert!(!m.is_reflective());
+        }
+    }
+
+    #[test]
+    fn a_non_dispersive_medium_has_infinite_abbe_number() {
+        assert!(Material::Fixed { n: 1.5 }.abbe().is_infinite());
+        assert!(Material::Vacuum.abbe().is_infinite());
+    }
+
+    #[test]
+    fn model_glass_reproduces_the_constants_it_was_built_from() {
+        // The whole point of model glass is to be a continuous stand-in pinned to a real
+        // glass's n_d and V_d, so it must return exactly those.
+        for (nd, vd) in [(1.5168, 64.17), (1.7847, 25.68), (1.62, 36.37)] {
+            let g = Material::ModelGlass { nd, vd };
+            assert!((g.nd() - nd).abs() < 1e-12, "n_d {} vs {nd}", g.nd());
+            assert!((g.abbe() - vd).abs() < 1e-9, "V_d {} vs {vd}", g.abbe());
+        }
+    }
+
+    #[test]
+    fn schott_form_with_a_single_constant_term_is_non_dispersive() {
+        let m = Material::Schott {
+            a: [2.25, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        assert!((m.index(0.4) - 1.5).abs() < 1e-15);
+        assert!((m.index(0.7) - 1.5).abs() < 1e-15);
+    }
+
+    #[test]
+    fn glasses_show_normal_dispersion_across_the_visible() {
+        // Index must fall monotonically with wavelength, and blue must exceed red.
+        for (name, glass, ..) in catalog::PUBLISHED {
+            let mut previous = f64::INFINITY;
+            for step in 0..=20 {
+                let wl = 0.40 + 0.35 * step as f64 / 20.0;
+                let n = glass.index(wl);
+                assert!(n < previous, "{name} is not monotonic at {wl} um");
+                assert!((1.3..2.1).contains(&n), "{name}: implausible index {n}");
+                previous = n;
+            }
+            assert!(glass.index(lines::F) > glass.index(lines::C), "{name}");
+            assert!(glass.abbe() > 10.0 && glass.abbe() < 100.0, "{name}");
+        }
+    }
+
+    #[test]
+    fn air_is_very_slightly_denser_than_vacuum() {
+        let n = Material::Air.index(lines::D);
+        assert!((n - 1.000277).abs() < 5e-6, "air index {n}");
+        assert!(Material::Air.index(0.45) > Material::Air.index(0.65));
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)] // guards the constants against a bad edit
+    fn spectral_lines_are_ordered_from_blue_to_red() {
+        assert!(lines::G < lines::F);
+        assert!(lines::F < lines::E);
+        assert!(lines::E < lines::D);
+        assert!(lines::D < lines::C);
+    }
+
+    #[test]
+    fn catalog_lookup_ignores_case_and_separators() {
+        for spelling in ["N-BK7", "n-bk7", "NBK7", "n bk 7", "N_BK7"] {
+            assert_eq!(
+                catalog::by_name(spelling),
+                Some(catalog::N_BK7),
+                "{spelling}"
+            );
+        }
+        assert_eq!(catalog::by_name("SCHOTT-UNOBTAINIUM"), None);
+        assert_eq!(catalog::by_name(""), None);
+    }
+
+    #[test]
+    fn every_catalog_entry_is_reachable_by_name() {
+        for (name, glass, ..) in catalog::PUBLISHED {
+            assert_eq!(catalog::by_name(name).as_ref(), Some(*glass), "{name}");
+        }
+    }
+}

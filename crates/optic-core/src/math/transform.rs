@@ -107,3 +107,75 @@ fn mul3<S: Scalar>(a: [[S; 3]; 3], b: [[S; 3]; 3]) -> [[S; 3]; 3] {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const P: [f64; 3] = [1.5, -2.5, 3.0];
+
+    fn p() -> Vec3<f64> {
+        Vec3::new(P[0], P[1], P[2])
+    }
+
+    fn close(a: Vec3<f64>, b: [f64; 3]) {
+        let d = a.value();
+        for i in 0..3 {
+            assert!((d[i] - b[i]).abs() < 1e-12, "{d:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn identity_changes_nothing() {
+        let t = Transform::identity();
+        close(t.point_to_global(p()), P);
+        close(t.point_to_local(p()), P);
+        assert!(t.is_identity_rotation());
+    }
+
+    #[test]
+    fn along_axis_shifts_only_z() {
+        let t = Transform::along_axis(10.0);
+        close(t.point_to_global(p()), [P[0], P[1], P[2] + 10.0]);
+        close(t.point_to_local(p()), [P[0], P[1], P[2] - 10.0]);
+        assert!(t.is_identity_rotation());
+    }
+
+    #[test]
+    fn directions_ignore_translation_but_points_do_not() {
+        let t = Transform::along_axis(7.0);
+        close(t.dir_to_global(Vec3::axis()), [0.0, 0.0, 1.0]);
+        close(t.dir_to_local(Vec3::axis()), [0.0, 0.0, 1.0]);
+        assert!(t.point_to_global(Vec3::zero()).z == 7.0);
+    }
+
+    #[test]
+    fn local_and_global_are_exact_inverses() {
+        // The tracer converts into a surface's frame and back on every hit, so any
+        // asymmetry here would accumulate silently down the surface list.
+        let t = Transform::decenter_tilt(1.0, -2.0, 0.15, -0.3, 0.45);
+        close(t.point_to_local(t.point_to_global(p())), P);
+        close(t.point_to_global(t.point_to_local(p())), P);
+        close(t.dir_to_local(t.dir_to_global(p())), P);
+    }
+
+    #[test]
+    fn rotation_preserves_length() {
+        let t = Transform::decenter_tilt(0.0, 0.0, 0.3, 0.7, -1.1);
+        let r = t.dir_to_global(p());
+        assert!((r.norm() - p().norm()).abs() < 1e-13);
+        assert!(!t.is_identity_rotation());
+    }
+
+    #[test]
+    fn a_tilt_about_x_rotates_y_into_z() {
+        let t = Transform::decenter_tilt(0.0, 0.0, std::f64::consts::FRAC_PI_2, 0.0, 0.0);
+        close(t.dir_to_global(Vec3::new(0.0, 1.0, 0.0)), [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn decentre_is_applied_in_the_transverse_plane() {
+        let t = Transform::decenter_tilt(3.0, -4.0, 0.0, 0.0, 0.0);
+        close(t.point_to_global(Vec3::zero()), [3.0, -4.0, 0.0]);
+    }
+}

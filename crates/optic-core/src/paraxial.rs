@@ -242,3 +242,237 @@ impl<S: Scalar> Paraxial<S> {
         chief_ray(sys, wl, field, self.ep_z)[sys.image_index()].y
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::material::{catalog, lines, Material};
+    use crate::surface::Profile;
+    use crate::system::{Aperture, Field, Surface, Wavelength};
+
+    /// A thin lens in vacuum: two surfaces with no glass thickness between them.
+    fn thin_lens(r1: f64, r2: f64, n: f64) -> System<f64> {
+        System::new(
+            Object::Infinity,
+            vec![
+                Surface::new(r1, 0.0, Material::Fixed { n }).stop(),
+                Surface::new(r2, 100.0, Material::Vacuum),
+                Surface::plane(0.0, Material::Vacuum),
+            ],
+        )
+        .with_aperture(Aperture::EntrancePupilDiameter(4.0))
+    }
+
+    #[test]
+    fn a_thin_lens_obeys_the_lensmakers_equation() {
+        for (r1, r2, n) in [
+            (100.0, -100.0, 1.5),
+            (50.0, f64::INFINITY, 1.5),
+            (f64::INFINITY, -75.0, 1.62),
+            (-60.0, 60.0, 1.5), // a negative lens
+        ] {
+            let expected = 1.0 / ((n - 1.0) * (1.0 / r1 - 1.0 / r2));
+            let efl = Paraxial::compute(&thin_lens(r1, r2, n), lines::D).efl;
+            assert!(
+                (efl - expected).abs() < 1e-9,
+                "R1={r1} R2={r2}: EFL {efl} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_negative_lens_has_a_negative_focal_length() {
+        assert!(Paraxial::compute(&thin_lens(-60.0, 60.0, 1.5), lines::D).efl < 0.0);
+    }
+
+    #[test]
+    fn a_concave_mirror_focuses_at_half_its_radius() {
+        // The reflective path flips the sign of the following index; nothing else in
+        // the system exercises it, so it is checked in isolation against f = R/2.
+        for radius in [-100.0, -250.0] {
+            let sys: System<f64> = System::new(
+                Object::Infinity,
+                vec![
+                    Surface::new(radius, radius / 2.0, Material::Mirror).stop(),
+                    Surface::plane(0.0, Material::Vacuum),
+                ],
+            )
+            .with_aperture(Aperture::EntrancePupilDiameter(20.0));
+
+            let par = Paraxial::compute(&sys, lines::D);
+            assert!(
+                (par.efl - radius / 2.0).abs() < 1e-10,
+                "R={radius}: EFL {} vs {}",
+                par.efl,
+                radius / 2.0
+            );
+            assert!(
+                (par.bfd - radius / 2.0).abs() < 1e-10,
+                "R={radius}: BFD {}",
+                par.bfd
+            );
+        }
+    }
+
+    #[test]
+    fn reflection_flips_the_sign_of_every_index_downstream() {
+        let sys: System<f64> = System::new(
+            Object::Infinity,
+            vec![
+                Surface::new(-100.0, -50.0, Material::Mirror).stop(),
+                Surface::plane(0.0, Material::Vacuum),
+            ],
+        );
+        let idx = signed_indices(&sys, lines::D);
+        assert_eq!(idx[0].0, 1.0); // before the mirror, forward
+        assert_eq!(idx[0].1, -1.0); // after it, folded
+        assert_eq!(idx[1].0, -1.0); // and it stays folded
+        assert_eq!(idx[1].1, -1.0);
+    }
+
+    #[test]
+    fn dispersion_shortens_the_focal_length_in_the_blue() {
+        let sys: System<f64> = System::new(
+            Object::Infinity,
+            vec![
+                Surface::new(80.0, 5.0, catalog::N_BK7).stop(),
+                Surface::new(-80.0, 80.0, Material::Vacuum),
+                Surface::plane(0.0, Material::Vacuum),
+            ],
+        )
+        .with_wavelengths(vec![Wavelength::new(lines::F), Wavelength::new(lines::C)]);
+
+        let blue = Paraxial::compute(&sys, lines::F).efl;
+        let red = Paraxial::compute(&sys, lines::C).efl;
+        assert!(
+            blue < red,
+            "axial colour has the wrong sign: {blue} vs {red}"
+        );
+        assert!((red - blue) / red > 1e-3, "axial colour implausibly small");
+    }
+
+    #[test]
+    fn tracing_backwards_undoes_tracing_forwards() {
+        let sys = crate::samples::cooke_triplet::<f64>();
+        let (y0, u0) = (0.7, -0.013);
+        let states = forward(&sys, lines::D, y0, u0);
+
+        for from in 1..sys.surfaces.len() {
+            let (y, u) = backward(&sys, lines::D, from, states[from].y, states[from - 1].u);
+            assert!((y - y0).abs() < 1e-12, "from {from}: height {y} vs {y0}");
+            assert!((u - u0).abs() < 1e-12, "from {from}: angle {u} vs {u0}");
+        }
+    }
+
+    #[test]
+    fn a_stop_at_the_front_is_its_own_entrance_pupil() {
+        let sys = thin_lens(100.0, -100.0, 1.5);
+        let (z, scale) = entrance_pupil(&sys, lines::D);
+        assert_eq!(z, 0.0);
+        assert_eq!(scale, 1.0);
+    }
+
+    #[test]
+    fn aiming_at_the_entrance_pupil_lands_on_the_stop() {
+        // This is the definition of the entrance pupil, and the only check of it worth
+        // making: a chief ray aimed at the pupil centre must cross the axis exactly at
+        // the stop, and a marginal ray at the pupil edge must graze the stop's rim.
+        // Where the pupil physically sits -- it is a virtual image, and in this triplet
+        // it falls behind the stop -- says nothing about whether it is correct.
+        let sys = crate::samples::cooke_triplet::<f64>();
+        let par = Paraxial::compute(&sys, lines::D);
+        let stop = sys.stop_index().unwrap();
+
+        for deg in [5.0, 14.0, 20.0] {
+            let chief = chief_ray(&sys, lines::D, Field::angle(deg), par.ep_z);
+            assert!(
+                chief[stop].y.abs() < 1e-12,
+                "chief ray at {deg} deg misses the stop centre by {}",
+                chief[stop].y
+            );
+        }
+
+        let (_, scale) = entrance_pupil(&sys, lines::D);
+        let expected_stop_radius = par.epd / 2.0 / scale;
+        assert!(
+            (par.marginal[stop].y.abs() - expected_stop_radius).abs() < 1e-12,
+            "marginal ray height at the stop {} vs expected rim {expected_stop_radius}",
+            par.marginal[stop].y
+        );
+        assert!(scale > 0.0 && scale.is_finite());
+    }
+
+    #[test]
+    fn every_aperture_specification_resolves_to_the_same_pupil() {
+        let base = crate::samples::cooke_triplet::<f64>();
+        let reference = Paraxial::compute(&base, lines::D);
+
+        // Restating the same aperture three different ways must not change the system.
+        let mut by_fno = base.clone();
+        by_fno.aperture = Aperture::ImageSpaceFNumber(reference.efl / reference.epd);
+        assert!((Paraxial::compute(&by_fno, lines::D).epd - reference.epd).abs() < 1e-9);
+
+        let (_, scale) = entrance_pupil(&base, lines::D);
+        let mut by_stop = base.clone();
+        by_stop.aperture = Aperture::StopDiameter(reference.epd / scale);
+        assert!((Paraxial::compute(&by_stop, lines::D).epd - reference.epd).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_working_f_number_follows_the_focal_ratio() {
+        let sys = crate::samples::cooke_triplet::<f64>();
+        let par = Paraxial::compute(&sys, lines::D);
+        // At infinite conjugates the working f/# is EFL / EPD to first order.
+        assert!(
+            (par.fno - par.efl / par.epd).abs() < 1e-6,
+            "f/# {}",
+            par.fno
+        );
+    }
+
+    #[test]
+    fn the_chief_ray_is_flat_on_axis() {
+        let sys = crate::samples::cooke_triplet::<f64>();
+        let par = Paraxial::compute(&sys, lines::D);
+        let axial = chief_ray(&sys, lines::D, Field::angle(0.0), par.ep_z);
+        for s in &axial {
+            assert_eq!(s.y, 0.0);
+            assert_eq!(s.u, 0.0);
+        }
+        assert_eq!(par.image_height(&sys, lines::D, Field::angle(0.0)), 0.0);
+    }
+
+    #[test]
+    fn image_height_grows_with_field_angle() {
+        let sys = crate::samples::cooke_triplet::<f64>();
+        let par = Paraxial::compute(&sys, lines::D);
+        let mut previous = 0.0;
+        for deg in [1.0, 5.0, 10.0, 20.0] {
+            let h = par.image_height(&sys, lines::D, Field::angle(deg));
+            assert!(h > previous, "height did not grow at {deg} degrees");
+            previous = h;
+        }
+    }
+
+    #[test]
+    fn a_mismatched_field_type_degrades_to_the_axis() {
+        // A finite-conjugate field angle, or an infinite-conjugate height, is a document
+        // error. It must not silently produce a plausible-looking wrong answer.
+        let sys = crate::samples::cooke_triplet::<f64>();
+        let states = chief_ray(&sys, lines::D, Field::height(5.0), 10.0);
+        assert!(states.iter().all(|s| s.y == 0.0 && s.u == 0.0));
+    }
+
+    #[test]
+    fn an_aspheric_vertex_does_not_disturb_first_order_optics() {
+        // Aspheric terms start at r^4, so adding them must leave the paraxial trace alone.
+        let mut sys = thin_lens(100.0, -100.0, 1.5);
+        let before = Paraxial::compute(&sys, lines::D).efl;
+        sys.surfaces[0].profile = Profile::EvenAsphere {
+            curvature: 1.0 / 100.0,
+            conic: -2.5,
+            coeffs: vec![1e-6, -3e-9],
+        };
+        assert!((Paraxial::compute(&sys, lines::D).efl - before).abs() < 1e-12);
+    }
+}

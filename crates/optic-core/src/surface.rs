@@ -251,3 +251,185 @@ impl<S: Scalar> Profile<S> {
         self.curvature()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const R: f64 = 50.0;
+
+    fn sphere() -> Profile<f64> {
+        Profile::sphere(R)
+    }
+
+    #[test]
+    fn a_degenerate_radius_means_flat() {
+        assert!(matches!(Profile::<f64>::sphere(0.0), Profile::Plane));
+        assert!(matches!(
+            Profile::<f64>::sphere(f64::INFINITY),
+            Profile::Plane
+        ));
+        assert!(matches!(Profile::<f64>::sphere(f64::NAN), Profile::Plane));
+        assert!(matches!(
+            Profile::<f64>::sphere(10.0),
+            Profile::Conic { .. }
+        ));
+    }
+
+    #[test]
+    fn a_plane_is_flat_everywhere_and_faces_the_axis() {
+        let p = Profile::<f64>::Plane;
+        assert_eq!(p.sag(0.0).unwrap(), 0.0);
+        assert_eq!(p.sag(100.0).unwrap(), 0.0);
+        assert_eq!(p.paraxial_curvature(), 0.0);
+        assert_eq!(
+            p.normal(Vec3::new(3.0, 4.0, 0.0)).unwrap().value(),
+            [0.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn spherical_sag_matches_the_closed_form() {
+        // z = R - sqrt(R^2 - r^2)
+        for r in [0.0, 1.0, 10.0, 25.0, 49.0] {
+            let expected = R - (R * R - r * r).sqrt();
+            let got = sphere().sag(r * r).unwrap();
+            assert!((got - expected).abs() < 1e-12, "r={r}: {got} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn a_paraboloid_has_exactly_quadratic_sag() {
+        // k = -1 removes the higher-order terms of the conic entirely.
+        let p: Profile<f64> = Profile::Conic {
+            curvature: 1.0 / R,
+            conic: -1.0,
+        };
+        for r in [0.5, 5.0, 40.0, 500.0] {
+            let expected = r * r / (2.0 * R);
+            assert!((p.sag(r * r).unwrap() - expected).abs() < 1e-10, "r={r}");
+        }
+    }
+
+    #[test]
+    fn a_sphere_is_undefined_beyond_its_equator() {
+        assert_eq!(sphere().sag(R * R * 1.01), Err(MissReason::OutsideProfile));
+        assert!(sphere().sag(R * R * 0.99).is_ok());
+    }
+
+    #[test]
+    fn a_spherical_normal_points_at_the_centre_of_curvature() {
+        // Vertex at the origin puts the centre at (0, 0, R).
+        let centre = Vec3::new(0.0, 0.0, R);
+        for (x, y) in [(0.0, 0.0), (5.0, 0.0), (-8.0, 12.0)] {
+            let z = sphere().sag(x * x + y * y).unwrap();
+            let p = Vec3::new(x, y, z);
+            let n = sphere().normal(p).unwrap();
+            assert!((n.norm() - 1.0).abs() < 1e-14);
+            // The normal and the vector towards the centre must be parallel.
+            assert!(n.cross(centre - p).norm() < 1e-12, "at ({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn an_axial_ray_meets_the_vertex() {
+        let t = sphere()
+            .intersect(Vec3::new(0.0, 0.0, -10.0), Vec3::axis())
+            .unwrap();
+        assert!((t - 10.0).abs() < 1e-13);
+    }
+
+    #[test]
+    fn intersections_land_on_the_sphere_itself() {
+        let centre = Vec3::new(0.0, 0.0, R);
+        for (oy, dy) in [(0.0, 0.05), (10.0, 0.0), (-20.0, 0.3)] {
+            let o = Vec3::new(2.0, oy, -30.0);
+            let d = Vec3::new(0.01, dy, 1.0).normalized();
+            let t = sphere().intersect(o, d).unwrap();
+            let p = o + d * t;
+            assert!(
+                ((p - centre).norm() - R).abs() < 1e-11,
+                "off-sphere at oy={oy}"
+            );
+            // The near branch: the vertex side, not the far side of the sphere.
+            assert!(p.z < R, "took the far root at oy={oy}");
+        }
+    }
+
+    #[test]
+    fn a_ray_parallel_to_a_plane_never_meets_it() {
+        let r =
+            Profile::<f64>::Plane.intersect(Vec3::new(0.0, 1.0, -5.0), Vec3::new(0.0, 1.0, 0.0));
+        assert_eq!(r, Err(MissReason::NoIntersection));
+    }
+
+    #[test]
+    fn a_ray_that_misses_the_sphere_entirely_is_rejected() {
+        let r = sphere().intersect(Vec3::new(0.0, 500.0, -30.0), Vec3::axis());
+        assert_eq!(r, Err(MissReason::OutsideProfile));
+    }
+
+    #[test]
+    fn an_asphere_with_no_polynomial_terms_is_its_base_conic() {
+        let conic: Profile<f64> = Profile::Conic {
+            curvature: 1.0 / 30.0,
+            conic: -0.5,
+        };
+        let asphere: Profile<f64> = Profile::EvenAsphere {
+            curvature: 1.0 / 30.0,
+            conic: -0.5,
+            coeffs: vec![],
+        };
+        let o = Vec3::new(1.0, -2.0, -12.0);
+        let d = Vec3::new(0.03, 0.02, 1.0).normalized();
+        assert!((conic.intersect(o, d).unwrap() - asphere.intersect(o, d).unwrap()).abs() < 1e-12);
+        assert!((conic.sag(9.0).unwrap() - asphere.sag(9.0).unwrap()).abs() < 1e-15);
+    }
+
+    #[test]
+    fn aspheric_coefficients_read_as_a4_a6_a8() {
+        // coeffs[i] multiplies r^(2i+4), so a flat base plus a single term is pure r^4.
+        let p: Profile<f64> = Profile::EvenAsphere {
+            curvature: 0.0,
+            conic: 0.0,
+            coeffs: vec![1e-4],
+        };
+        let r: f64 = 3.0;
+        assert!((p.sag(r * r).unwrap() - 1e-4 * r.powi(4)).abs() < 1e-15);
+
+        let q: Profile<f64> = Profile::EvenAsphere {
+            curvature: 0.0,
+            conic: 0.0,
+            coeffs: vec![0.0, 2e-6],
+        };
+        assert!((q.sag(r * r).unwrap() - 2e-6 * r.powi(6)).abs() < 1e-18);
+    }
+
+    #[test]
+    fn a_flat_based_asphere_still_intersects() {
+        // Zero curvature takes the plane branch for the seed; Newton must still refine
+        // onto the polynomial.
+        let p: Profile<f64> = Profile::EvenAsphere {
+            curvature: 0.0,
+            conic: 0.0,
+            coeffs: vec![1e-4],
+        };
+        let o = Vec3::new(0.0, 2.0, -5.0);
+        let d = Vec3::new(0.0, 0.1, 1.0).normalized();
+        let t = p.intersect(o, d).unwrap();
+        let hit = o + d * t;
+        let residual = hit.z - p.sag(hit.x * hit.x + hit.y * hit.y).unwrap();
+        assert!(residual.abs() < 1e-12, "off-surface by {residual}");
+    }
+
+    #[test]
+    fn paraxial_curvature_ignores_the_polynomial() {
+        let p: Profile<f64> = Profile::EvenAsphere {
+            curvature: 0.02,
+            conic: -3.0,
+            coeffs: vec![1e-3, 1e-5],
+        };
+        assert_eq!(p.paraxial_curvature(), 0.02);
+        assert_eq!(Profile::<f64>::Plane.paraxial_curvature(), 0.0);
+    }
+}
