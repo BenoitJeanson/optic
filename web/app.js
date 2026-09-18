@@ -5,6 +5,10 @@
  * back. There is no incremental update path and none is wanted: a full analysis of a
  * triplet takes a few milliseconds, so recomputing everything keeps what you see and
  * what the kernel believes in permanent agreement.
+ *
+ * Two things deliberately live outside the prescription, because they are questions
+ * asked *of* a design rather than parts of it: the defocus shift and the pupil sampling
+ * pattern. Neither edits the lens.
  */
 
 import { OpticEngine } from "./engine.js";
@@ -16,9 +20,20 @@ const state = {
   glasses: [],
   spec: null,
   analysis: null,
-  /** Thickness before the image plane with the defocus slider centred. */
-  focusBase: 0,
+  /** Which transverse axis the field list refers to. */
+  fieldAxis: "y",
+  /** Image-plane shift in mm, applied after solves. Not part of the design. */
+  defocus: 0,
+  pupilPattern: "square",
+  showAiry: true,
   pending: false,
+};
+
+const SOLVE_LABELS = {
+  fixed: "—",
+  marginal_ray_height: "Marginal ray",
+  chief_ray_height: "Chief ray",
+  pickup: "Pickup",
 };
 
 const el = (id) => document.getElementById(id);
@@ -45,27 +60,60 @@ async function boot() {
     state.spec.entrance_pupil_diameter = Math.max(0.01, Number(e.target.value) || 0.01);
     schedule();
   });
+
   el("fields").addEventListener("change", (e) => {
     const parsed = parseNumbers(e.target.value);
-    state.spec.fields = parsed.length ? parsed : [0];
-    e.target.value = state.spec.fields.join(", ");
+    setFields(parsed.length ? parsed : [0]);
+    e.target.value = fieldMagnitudes().join(", ");
     schedule();
   });
+
+  el("field-axis").addEventListener("change", (e) => {
+    state.fieldAxis = e.target.value;
+    setFields(fieldMagnitudes());
+    schedule();
+  });
+
   el("wavelengths").addEventListener("change", (e) => {
     const parsed = parseNumbers(e.target.value).filter((w) => w > 0.1 && w < 20);
     state.spec.wavelengths = parsed.length ? parsed : [0.5875618];
+    if (state.spec.primary_wavelength >= state.spec.wavelengths.length) {
+      state.spec.primary_wavelength = state.spec.wavelengths.length >> 1;
+    }
     e.target.value = state.spec.wavelengths.map((w) => w.toFixed(4)).join(", ");
+    renderPrimaryChoices();
     schedule();
   });
 
-  el("defocus").addEventListener("input", () => {
-    const offset = Number(el("defocus").value);
-    el("defocus-value").textContent = `${offset >= 0 ? "+" : ""}${offset.toFixed(2)} mm`;
-    lastSurface().thickness = state.focusBase + offset;
-    schedule({ redrawTable: true });
+  el("primary").addEventListener("change", (e) => {
+    state.spec.primary_wavelength = Number(e.target.value);
+    schedule();
   });
 
-  el("refocus").addEventListener("click", () => update({ refocus: true }));
+  el("pupil-pattern").addEventListener("change", (e) => {
+    state.pupilPattern = e.target.value;
+    schedule();
+  });
+
+  el("show-airy").addEventListener("change", (e) => {
+    state.showAiry = e.target.checked;
+    render();
+  });
+
+  el("defocus").addEventListener("input", () => {
+    state.defocus = Number(el("defocus").value);
+    el("defocus-value").textContent = `${state.defocus >= 0 ? "+" : ""}${state.defocus.toFixed(2)} mm`;
+    schedule();
+  });
+
+  el("refocus").addEventListener("click", () => {
+    state.defocus = 0;
+    el("defocus").value = 0;
+    el("defocus-value").textContent = "+0.00 mm";
+    // Only meaningful when nothing is solving the image distance for us.
+    const solved = lastSurface().solve?.type !== "fixed";
+    update({ refocus: !solved });
+  });
 
   // Bound once: renderTable replaces the rows, not the table body, so attaching there
   // would stack a new listener on every redraw.
@@ -81,20 +129,43 @@ function lastSurface() {
   return state.spec.surfaces[state.spec.surfaces.length - 2];
 }
 
+/** Field magnitudes along the currently selected axis. */
+function fieldMagnitudes() {
+  return state.spec.fields.map((f) => (Math.abs(f.x) > Math.abs(f.y) ? f.x : f.y));
+}
+
+function setFields(values) {
+  state.spec.fields = values.map((v) =>
+    state.fieldAxis === "x" ? { x: v, y: 0 } : { x: 0, y: v },
+  );
+}
+
 function loadPreset(index) {
   state.spec = structuredClone(state.presets[index]);
+  state.defocus = 0;
+  state.fieldAxis = state.spec.fields.some((f) => Math.abs(f.x) > Math.abs(f.y)) ? "x" : "y";
+
   el("epd").value = state.spec.entrance_pupil_diameter;
-  el("fields").value = state.spec.fields.join(", ");
+  el("fields").value = fieldMagnitudes().join(", ");
+  el("field-axis").value = state.fieldAxis;
   el("wavelengths").value = state.spec.wavelengths.map((w) => w.toFixed(4)).join(", ");
-  recentreDefocus();
+  el("defocus").value = 0;
+  el("defocus-value").textContent = "+0.00 mm";
+
+  renderPrimaryChoices();
   renderTable();
   update();
 }
 
-function recentreDefocus() {
-  state.focusBase = lastSurface().thickness;
-  el("defocus").value = 0;
-  el("defocus-value").textContent = "+0.00 mm";
+function renderPrimaryChoices() {
+  const primary = state.spec.primary_wavelength ?? state.spec.wavelengths.length >> 1;
+  state.spec.primary_wavelength = Math.min(primary, state.spec.wavelengths.length - 1);
+  el("primary").innerHTML = state.spec.wavelengths
+    .map(
+      (w, i) =>
+        `<option value="${i}"${i === state.spec.primary_wavelength ? " selected" : ""}>${w.toFixed(4)} &micro;m</option>`,
+    )
+    .join("");
 }
 
 /** Coalesce rapid edits into one analysis per frame. */
@@ -107,12 +178,14 @@ function schedule(options = {}) {
   });
 }
 
-function update({ refocus = false, redrawTable = false } = {}) {
+function update({ refocus = false } = {}) {
   const result = state.engine.analyze({
     system: state.spec,
     rays_per_fan: 15,
     spot_grid: 23,
     refocus,
+    pupil_pattern: state.pupilPattern,
+    defocus: state.defocus,
   });
 
   if (!result.ok) {
@@ -122,18 +195,15 @@ function update({ refocus = false, redrawTable = false } = {}) {
   }
   el("error").hidden = true;
 
-  // The engine echoes the prescription it actually used, so a refocus is visible.
-  if (refocus) {
-    state.spec = result.system;
-    recentreDefocus();
-    renderTable();
-  } else if (redrawTable) {
-    syncTableValues();
-  }
-
+  // The engine echoes the prescription it actually used, so solved thicknesses and a
+  // refocus show up in the editor rather than being applied invisibly.
+  state.spec = result.system;
   state.analysis = result;
+
+  syncSolvedThicknesses();
   render();
   renderReadout();
+  renderDistortion();
   renderWarnings();
 }
 
@@ -156,7 +226,7 @@ function render() {
           <canvas id="spot-${i}"></canvas>
           <figcaption>
             <span class="swatch" style="background:${fieldColour(i)}"></span>
-            <strong>${s.field.toFixed(1)}&deg;</strong>
+            <strong class="field-label"></strong>
             <span class="metrics"></span>
           </figcaption>
         </figure>`,
@@ -165,8 +235,13 @@ function render() {
   }
 
   spots.forEach((spot, i) => {
-    drawSpot(el(`spot-${i}`), spot, halfWidth, state.spec.wavelengths);
-    const caption = container.children[i].querySelector(".metrics");
+    drawSpot(el(`spot-${i}`), spot, halfWidth, state.spec.wavelengths, state.showAiry);
+    const figure = container.children[i];
+    const axis = Math.abs(spot.field.x) > Math.abs(spot.field.y) ? "X" : "Y";
+    const magnitude = Math.abs(spot.field.x) > Math.abs(spot.field.y) ? spot.field.x : spot.field.y;
+    figure.querySelector(".field-label").textContent = `${axis} ${magnitude.toFixed(1)}°`;
+
+    const caption = figure.querySelector(".metrics");
     const limited = spot.rms < spot.airy;
     caption.innerHTML = Number.isFinite(spot.rms)
       ? `RMS ${spot.rms.toFixed(1)} &micro;m${limited ? " &middot; diffraction limited" : ""}`
@@ -183,10 +258,54 @@ function renderReadout() {
     ["Entrance pupil", `${f.epd.toFixed(2)} mm`],
     ["Back focal distance", `${f.bfd.toFixed(3)} mm`],
     ["Total track", `${f.total_track.toFixed(2)} mm`],
+    ["Primary", `${state.analysis.primary_wavelength.toFixed(4)} µm`],
   ];
   el("first-order").innerHTML = rows
     .map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`)
     .join("");
+}
+
+/**
+ * Distortion per field and wavelength.
+ *
+ * It earns a table of its own because it is the one number that depends on nothing but
+ * the chief ray — no aperture, no vignetting, no sampling — which makes it the sharpest
+ * instrument available for comparing this kernel against another tool.
+ */
+function renderDistortion() {
+  const rows = state.analysis.distortion;
+  const table = el("distortion");
+  if (!rows.length) {
+    table.innerHTML = "";
+    table.hidden = true;
+    return;
+  }
+  table.hidden = false;
+
+  const wavelengths = state.spec.wavelengths;
+  const fields = [...new Set(rows.map((r) => r.field_index))].sort((a, b) => a - b);
+  const find = (fi, wi) =>
+    rows.find((r) => r.field_index === fi && Math.abs(r.wavelength - wavelengths[wi]) < 1e-12);
+
+  const head = `<tr><th>Distortion</th>${wavelengths
+    .map((w) => `<th>${w.toFixed(4)} &micro;m</th>`)
+    .join("")}</tr>`;
+  const body = fields
+    .map((fi) => {
+      const spot = state.analysis.spots[fi];
+      const axis = Math.abs(spot.field.x) > Math.abs(spot.field.y) ? "X" : "Y";
+      const magnitude =
+        Math.abs(spot.field.x) > Math.abs(spot.field.y) ? spot.field.x : spot.field.y;
+      const cells = wavelengths
+        .map((_, wi) => {
+          const cell = find(fi, wi);
+          return `<td>${cell ? `${cell.percent >= 0 ? "+" : ""}${cell.percent.toFixed(4)}%` : "&mdash;"}</td>`;
+        })
+        .join("");
+      return `<tr><th scope="row">${axis} ${magnitude.toFixed(1)}&deg;</th>${cells}</tr>`;
+    })
+    .join("");
+  table.innerHTML = `<thead>${head}</thead><tbody>${body}</tbody>`;
 }
 
 function renderWarnings() {
@@ -199,10 +318,20 @@ function renderTable() {
   const rows = state.spec.surfaces.map((s, i) => {
     const isImage = i === state.spec.surfaces.length - 1;
     const name = isImage ? "IMG" : String(i + 1);
-    const options = state.glasses
+    const solveType = s.solve?.type ?? "fixed";
+    const solved = solveType !== "fixed";
+
+    const glassOptions = state.glasses
       .map(
         (g) =>
           `<option value="${g}"${g.toUpperCase() === s.glass.toUpperCase() ? " selected" : ""}>${g}</option>`,
+      )
+      .join("");
+
+    const solveOptions = ["fixed", "marginal_ray_height", "chief_ray_height"]
+      .map(
+        (v) =>
+          `<option value="${v}"${v === solveType ? " selected" : ""}>${SOLVE_LABELS[v]}</option>`,
       )
       .join("");
 
@@ -214,9 +343,12 @@ function renderTable() {
         <td>${
           isImage
             ? "&mdash;"
-            : `<input type="number" step="0.1" data-field="thickness" data-row="${i}" value="${round(s.thickness)}" aria-label="Thickness after surface ${name}">`
+            : `<input type="number" step="0.1" data-field="thickness" data-row="${i}"
+                      value="${round(s.thickness)}"${solved ? " readonly class=\"solved\"" : ""}
+                      aria-label="Thickness after surface ${name}">`
         }</td>
-        <td>${isImage ? "&mdash;" : `<select data-field="glass" data-row="${i}" aria-label="Glass after surface ${name}">${options}</select>`}</td>
+        <td>${isImage ? "&mdash;" : `<select data-field="glass" data-row="${i}" aria-label="Glass after surface ${name}">${glassOptions}</select>`}</td>
+        <td>${isImage ? "&mdash;" : `<select data-field="solve" data-row="${i}" aria-label="Thickness solve for surface ${name}">${solveOptions}</select>`}</td>
         <td><input type="number" step="0.1" min="0" data-field="semi_diameter" data-row="${i}"
                    value="${s.semi_diameter ?? ""}" placeholder="auto" aria-label="Semi-diameter of surface ${name}"></td>
         <td>${isImage ? "" : `<input type="radio" name="stop" data-row="${i}"${s.stop ? " checked" : ""} aria-label="Aperture stop at surface ${name}">`}</td>
@@ -233,30 +365,41 @@ function onCellEdit(event) {
 
   if (target.type === "radio") {
     state.spec.surfaces.forEach((s, i) => (s.stop = i === row));
+    schedule();
+    return;
+  }
+
+  const field = target.dataset.field;
+  const raw = target.value.trim();
+
+  if (field === "solve") {
+    state.spec.surfaces[row].solve =
+      raw === "fixed" ? { type: "fixed" } : { type: raw, height: 0 };
+    renderTable();
+    schedule();
+    return;
+  }
+
+  if (field === "glass") {
+    state.spec.surfaces[row].glass = raw;
+  } else if (raw === "") {
+    // Empty means "flat" for a radius and "work it out from the rays" for an aperture.
+    state.spec.surfaces[row][field] = field === "thickness" ? 0 : null;
   } else {
-    const field = target.dataset.field;
-    const raw = target.value.trim();
-    if (field === "glass") {
-      state.spec.surfaces[row].glass = raw;
-    } else if (raw === "") {
-      // Empty means "flat" for a radius and "work it out from the rays" for an aperture.
-      state.spec.surfaces[row][field] = field === "thickness" ? 0 : null;
-    } else {
-      state.spec.surfaces[row][field] = Number(raw);
-    }
-    if (field === "thickness" && row === state.spec.surfaces.length - 2) {
-      recentreDefocus();
-    }
+    state.spec.surfaces[row][field] = Number(raw);
   }
   schedule();
 }
 
-/** Push engine-side changes back into the inputs without rebuilding the table. */
-function syncTableValues() {
-  const input = document.querySelector(
-    `#prescription input[data-field="thickness"][data-row="${state.spec.surfaces.length - 2}"]`,
-  );
-  if (input) input.value = round(lastSurface().thickness);
+/** Write solved thicknesses back into their inputs without rebuilding the table. */
+function syncSolvedThicknesses() {
+  state.spec.surfaces.forEach((s, i) => {
+    if ((s.solve?.type ?? "fixed") === "fixed") return;
+    const input = document.querySelector(
+      `#prescription input[data-field="thickness"][data-row="${i}"]`,
+    );
+    if (input && document.activeElement !== input) input.value = round(s.thickness);
+  });
 }
 
 function parseNumbers(text) {

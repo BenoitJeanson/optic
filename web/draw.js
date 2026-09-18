@@ -117,10 +117,9 @@ export function drawLayout(canvas, analysis) {
   }
 
   // Rays.
-  const fields = analysis.system.fields;
   ctx.lineWidth = 0.9;
   for (const ray of analysis.layout.rays) {
-    const index = Math.max(0, fields.indexOf(ray.field));
+    const index = ray.field_index;
     ctx.strokeStyle = fieldColour(index);
     ctx.globalAlpha = ray.complete ? 0.75 : 0.35;
     path(ray.points);
@@ -209,7 +208,7 @@ function niceStep(raw) {
  * Draw one spot diagram. `halfWidthUm` is shared across fields so the panels can be
  * compared directly, which is the whole point of showing them side by side.
  */
-export function drawSpot(canvas, spot, halfWidthUm, wavelengths) {
+export function drawSpot(canvas, spot, halfWidthUm, wavelengths, showAiry = true) {
   const { ctx, width, height } = prepare(canvas);
   const theme = themeColours();
   const size = Math.min(width, height);
@@ -240,7 +239,7 @@ export function drawSpot(canvas, spot, halfWidthUm, wavelengths) {
   }
 
   // The Airy disc, for scale: a spot inside this circle is diffraction limited.
-  if (spot.airy * scale > 2) {
+  if (showAiry && spot.airy * scale > 2) {
     ctx.save();
     ctx.strokeStyle = theme.ink;
     ctx.globalAlpha = 0.45;

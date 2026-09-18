@@ -20,7 +20,9 @@ pub fn singlet<S: Scalar>() -> System<S> {
             Surface::new(100.0, 5.0, catalog::N_BK7)
                 .stop()
                 .labelled("front"),
-            Surface::new(-100.0, 97.0, Material::Vacuum).labelled("back"),
+            Surface::new(-100.0, 97.0, Material::Vacuum)
+                .autofocus()
+                .labelled("back"),
             Surface::plane(0.0, Material::Vacuum).labelled("image"),
         ],
     )
@@ -63,6 +65,7 @@ pub fn cooke_triplet<S: Scalar>() -> System<S> {
                 .labelled("crown 2 front"),
             Surface::new(-18.39533, 42.0, Material::Vacuum)
                 .with_semi_diameter(6.5)
+                .autofocus()
                 .labelled("crown 2 back"),
             Surface::plane(0.0, Material::Vacuum).labelled("image"),
         ],

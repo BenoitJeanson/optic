@@ -39,9 +39,20 @@
             <span>Field angles (&deg;)</span>
             <input id="fields" type="text" inputmode="decimal" />
           </label>
-          <label class="wide">
+          <label>
+            <span>Field direction</span>
+            <select id="field-axis">
+              <option value="y">+Y</option>
+              <option value="x">+X</option>
+            </select>
+          </label>
+          <label>
             <span>Wavelengths (&micro;m)</span>
             <input id="wavelengths" type="text" inputmode="decimal" />
+          </label>
+          <label>
+            <span>Primary wavelength</span>
+            <select id="primary"></select>
           </label>
         </div>
 
@@ -64,6 +75,7 @@
               <th scope="col">Radius</th>
               <th scope="col">Thickness</th>
               <th scope="col">Glass</th>
+              <th scope="col">Solve</th>
               <th scope="col">Semi-&#8960;</th>
               <th scope="col">Stop</th>
             </tr>
@@ -80,7 +92,22 @@
           <canvas id="layout" aria-label="Cross-section of the optical system with traced rays"></canvas>
           <figcaption>Layout — rays at each field, drawn to scale</figcaption>
         </figure>
+        <div class="spot-controls">
+          <label>
+            <span>Pupil sampling</span>
+            <select id="pupil-pattern">
+              <option value="square">Square</option>
+              <option value="hexapolar">Hexapolar</option>
+              <option value="dithered">Dithered</option>
+            </select>
+          </label>
+          <label class="inline">
+            <input id="show-airy" type="checkbox" checked />
+            <span>Show Airy disc</span>
+          </label>
+        </div>
         <div id="spots" class="spots"></div>
+        <table id="distortion" class="distortion"></table>
       </section>
     </main>
 

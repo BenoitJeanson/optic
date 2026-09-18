@@ -11,11 +11,112 @@
 
 use optic_core::{
     catalog, launch, samples,
+    solve::{self, ThicknessSolve},
     surface::Profile,
     system::{Aperture, Field, Object, Surface, Wavelength},
     trace, Material, Paraxial, System,
 };
 use serde::{Deserialize, Serialize};
+
+/// How a thickness is determined, in the form the editor exchanges.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SolveSpec {
+    /// Use the typed value.
+    #[default]
+    Fixed,
+    /// Put the next surface where the paraxial marginal ray reaches `height`.
+    /// With height 0 on the last thickness this is autofocus.
+    MarginalRayHeight {
+        #[serde(default)]
+        height: f64,
+    },
+    /// Put the next surface where the paraxial chief ray reaches `height`.
+    ChiefRayHeight {
+        #[serde(default)]
+        height: f64,
+    },
+    /// Copy surface `from`'s thickness: `scale * t + offset`.
+    Pickup {
+        from: usize,
+        #[serde(default = "one")]
+        scale: f64,
+        #[serde(default)]
+        offset: f64,
+    },
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+impl SolveSpec {
+    fn to_core(self) -> ThicknessSolve<f64> {
+        match self {
+            SolveSpec::Fixed => ThicknessSolve::Fixed,
+            SolveSpec::MarginalRayHeight { height } => ThicknessSolve::MarginalRayHeight { height },
+            SolveSpec::ChiefRayHeight { height } => ThicknessSolve::ChiefRayHeight { height },
+            SolveSpec::Pickup {
+                from,
+                scale,
+                offset,
+            } => ThicknessSolve::Pickup {
+                from,
+                scale,
+                offset,
+            },
+        }
+    }
+
+    fn from_core(s: ThicknessSolve<f64>) -> Self {
+        match s {
+            ThicknessSolve::Fixed => SolveSpec::Fixed,
+            ThicknessSolve::MarginalRayHeight { height } => SolveSpec::MarginalRayHeight { height },
+            ThicknessSolve::ChiefRayHeight { height } => SolveSpec::ChiefRayHeight { height },
+            ThicknessSolve::Pickup {
+                from,
+                scale,
+                offset,
+            } => SolveSpec::Pickup {
+                from,
+                scale,
+                offset,
+            },
+        }
+    }
+}
+
+/// A field point, with both transverse components named as a prescription names them.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct FieldSpec {
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+}
+
+impl FieldSpec {
+    pub fn radius(&self) -> f64 {
+        (self.x * self.x + self.y * self.y).sqrt()
+    }
+}
+
+/// How the pupil is sampled when building a spot diagram.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PupilPattern {
+    /// A square lattice clipped to the pupil. Even coverage, visible rows and columns.
+    #[default]
+    Square,
+    /// Rings of increasing population. The usual choice for reading a spot's shape,
+    /// because the sampling density is uniform in area rather than in x and y.
+    Hexapolar,
+    /// A square lattice with each point jittered inside its own cell. Breaks up the
+    /// lattice artefacts that make a square grid look structured, and converges on the
+    /// RMS faster. The jitter is derived from the point's index, not a random number
+    /// generator, so the same system always produces the same diagram.
+    Dithered,
+}
 
 /// One row of the prescription, as the editor presents it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -34,6 +135,8 @@ pub struct SurfaceSpec {
     #[serde(default)]
     pub stop: bool,
     #[serde(default)]
+    pub solve: SolveSpec,
+    #[serde(default)]
     pub label: String,
 }
 
@@ -43,10 +146,14 @@ pub struct SystemSpec {
     pub title: String,
     /// Entrance pupil diameter, in millimetres.
     pub entrance_pupil_diameter: f64,
-    /// Wavelengths in micrometres. The middle one is treated as primary.
+    /// Wavelengths in micrometres.
     pub wavelengths: Vec<f64>,
-    /// Field angles in degrees, for an object at infinity.
-    pub fields: Vec<f64>,
+    /// Index into `wavelengths` of the primary line: the one first-order data, the
+    /// layout and the Airy radius are referred to. Defaults to the middle entry.
+    #[serde(default)]
+    pub primary_wavelength: Option<usize>,
+    /// Field points in degrees, for an object at infinity.
+    pub fields: Vec<FieldSpec>,
     /// Surfaces in order; the last one is the image plane.
     pub surfaces: Vec<SurfaceSpec>,
 }
@@ -63,6 +170,16 @@ pub struct Request {
     /// Move the image plane to the paraxial focus before analysing.
     #[serde(default)]
     pub refocus: bool,
+    /// How to sample the pupil for spot diagrams.
+    #[serde(default)]
+    pub pupil_pattern: PupilPattern,
+    /// Shift the image plane by this much, in millimetres, *after* solves are applied.
+    ///
+    /// Keeping defocus here rather than in the prescription means exploring focus does
+    /// not fight an autofocus solve, and does not edit the design to ask a question
+    /// about it.
+    #[serde(default)]
+    pub defocus: f64,
 }
 
 fn default_fan() -> usize {
@@ -89,7 +206,8 @@ pub struct Polyline {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RayPath {
-    pub field: f64,
+    /// Index into the system's field list, for colouring.
+    pub field_index: usize,
     pub points: Vec<[f64; 2]>,
     /// False when the ray was stopped before the image plane.
     pub complete: bool,
@@ -114,9 +232,22 @@ pub struct SpotPoint {
     pub w: usize,
 }
 
+/// Real chief-ray height against the paraxial prediction, at one field and wavelength.
+///
+/// Distortion is a chief-ray property, so it is untouched by aperture, vignetting and
+/// pupil sampling. That makes it the cleanest single number for comparing two tools:
+/// if it disagrees, the prescriptions differ, not the settings.
+#[derive(Clone, Debug, Serialize)]
+pub struct DistortionPoint {
+    pub field_index: usize,
+    pub wavelength: f64,
+    pub percent: f64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Spot {
-    pub field: f64,
+    pub field: FieldSpec,
+    pub field_index: usize,
     /// RMS spot radius about the centroid, micrometres.
     pub rms: f64,
     /// Radius enclosing every ray, micrometres.
@@ -137,6 +268,10 @@ pub struct Analysis {
     pub first_order: FirstOrder,
     pub layout: Layout,
     pub spots: Vec<Spot>,
+    /// Distortion at every field and wavelength.
+    pub distortion: Vec<DistortionPoint>,
+    /// The wavelength first-order data refers to, in micrometres.
+    pub primary_wavelength: f64,
     pub warnings: Vec<String>,
     /// The prescription actually analysed, which differs from the request if refocused.
     pub system: SystemSpec,
@@ -191,6 +326,7 @@ impl SystemSpec {
                 profile,
                 thickness: s.thickness,
                 material: material_for(&s.glass).map_err(|e| format!("surface {}: {e}", i + 1))?,
+                thickness_solve: s.solve.to_core(),
                 semi_diameter: s.semi_diameter.filter(|v| *v > 0.0),
                 is_stop: s.stop,
                 label: s.label.clone(),
@@ -199,6 +335,7 @@ impl SystemSpec {
             if i + 1 == self.surfaces.len() {
                 surf.material = Material::Vacuum;
                 surf.thickness = 0.0;
+                surf.thickness_solve = ThicknessSolve::Fixed;
             }
             surfaces.push(surf);
         }
@@ -208,7 +345,12 @@ impl SystemSpec {
             .with_aperture(Aperture::EntrancePupilDiameter(
                 self.entrance_pupil_diameter,
             ))
-            .with_fields(self.fields.iter().map(|d| Field::angle(*d)).collect())
+            .with_fields(
+                self.fields
+                    .iter()
+                    .map(|f| Field::Angle { x: f.x, y: f.y })
+                    .collect(),
+            )
             .with_wavelengths(
                 self.wavelengths
                     .iter()
@@ -228,9 +370,75 @@ impl SystemSpec {
     }
 }
 
-/// The wavelength treated as primary: the middle of the list.
-fn primary(wavelengths: &[f64]) -> f64 {
-    wavelengths[wavelengths.len() / 2]
+impl SystemSpec {
+    /// Index of the primary wavelength, clamped into range.
+    pub fn primary_index(&self) -> usize {
+        self.primary_wavelength
+            .filter(|i| *i < self.wavelengths.len())
+            .unwrap_or(self.wavelengths.len() / 2)
+    }
+
+    /// The wavelength first-order data and the Airy radius are referred to.
+    pub fn primary(&self) -> f64 {
+        self.wavelengths[self.primary_index()]
+    }
+}
+
+/// Normalised pupil coordinates for one sampling pattern.
+///
+/// `n` sets the density: for a square or dithered lattice it is the side of the grid,
+/// for hexapolar it fixes the ring count so the total lands near the same number.
+pub fn pupil_points(pattern: PupilPattern, n: usize) -> Vec<(f64, f64)> {
+    let n = n.clamp(3, 81);
+    match pattern {
+        PupilPattern::Square | PupilPattern::Dithered => {
+            let dithered = pattern == PupilPattern::Dithered;
+            let mut out = Vec::with_capacity(n * n);
+            for a in 0..n {
+                for b in 0..n {
+                    let (jx, jy) = if dithered {
+                        jitter((a * n + b) as u64)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let px = -1.0 + 2.0 * (a as f64 + 0.5 + jx) / n as f64;
+                    let py = -1.0 + 2.0 * (b as f64 + 0.5 + jy) / n as f64;
+                    if px * px + py * py <= 1.0 {
+                        out.push((px, py));
+                    }
+                }
+            }
+            out
+        }
+        PupilPattern::Hexapolar => {
+            let rings = (n / 2).max(1);
+            let mut out = vec![(0.0, 0.0)];
+            for ring in 1..=rings {
+                let r = ring as f64 / rings as f64;
+                let count = 6 * ring;
+                for k in 0..count {
+                    let theta = std::f64::consts::TAU * k as f64 / count as f64;
+                    out.push((r * theta.cos(), r * theta.sin()));
+                }
+            }
+            out
+        }
+    }
+}
+
+/// Deterministic sub-cell offset in `[-0.5, 0.5)^2`.
+///
+/// A hash of the point's index rather than a random number generator, so a dithered
+/// diagram is reproducible: the same system always yields the same picture, which
+/// matters when a spot diagram is evidence in a design review.
+fn jitter(i: u64) -> (f64, f64) {
+    let mut z = i.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    let a = (z & 0xFFFF_FFFF) as f64 / u32::MAX as f64 - 0.5;
+    let b = ((z >> 32) & 0xFFFF_FFFF) as f64 / u32::MAX as f64 - 0.5;
+    (a, b)
 }
 
 /// Largest radius at which a profile still has a defined sag.
@@ -259,11 +467,32 @@ fn sample_profile(profile: &Profile<f64>, vertex_z: f64, sd: f64, n: usize) -> V
 /// Run the full analysis.
 pub fn analyze(request: &Request) -> Result<Analysis, String> {
     let mut sys = request.system.build()?;
-    let wl = primary(&request.system.wavelengths);
+    let wl = request.system.primary();
     let mut warnings = Vec::new();
 
     if request.refocus {
         samples::focus(&mut sys, wl);
+    }
+
+    // Solves run before anything is traced, so every analysis below sees a system that
+    // already satisfies them.
+    match solve::resolve(&mut sys, wl) {
+        optic_core::SolveReport::Degenerate { surface, reason } => {
+            warnings.push(format!("surface {}: solve ignored, {reason}", surface + 1));
+        }
+        optic_core::SolveReport::NotConverged { passes } => {
+            warnings.push(format!("solves did not settle after {passes} passes"));
+        }
+        _ => {}
+    }
+
+    // Snapshot what the design says before defocus perturbs it. Defocus is a question
+    // asked *of* the design, so the editor must keep showing the design's own numbers.
+    let design_thicknesses: Vec<f64> = sys.surfaces.iter().map(|s| s.thickness).collect();
+
+    if request.defocus != 0.0 {
+        let last = sys.image_index() - 1;
+        sys.surfaces[last].thickness += request.defocus;
     }
 
     let par = Paraxial::compute(&sys, wl);
@@ -273,7 +502,7 @@ pub fn analyze(request: &Request) -> Result<Analysis, String> {
 
     let vertices = sys.vertices();
     let image_z = vertices[sys.image_index()];
-    let fields: Vec<f64> = sys.fields.iter().map(|f| f.radius()).collect();
+    let field_specs = request.system.fields.clone();
 
     // Semi-diameters that were not given are taken from where the rays actually land.
     let mut traced_sd = vec![0.0f64; sys.surfaces.len()];
@@ -339,45 +568,59 @@ pub fn analyze(request: &Request) -> Result<Analysis, String> {
             let mut points = vec![[head.z, head.y]];
             points.extend(traced.hits.iter().map(|h| [h.global.z, h.global.y]));
             rays.push(RayPath {
-                field: fields[fi],
+                field_index: fi,
                 points,
                 complete: traced.is_complete(),
             });
         }
     }
 
-    // Spot diagrams, over the full wavelength set.
-    let grid = request.spot_grid.clamp(3, 81);
+    // Spot diagrams over the whole wavelength set, and distortion per wavelength.
+    let pupil = pupil_points(request.pupil_pattern, request.spot_grid);
     let mut spots = Vec::new();
+    let mut distortion = Vec::new();
+
     for (fi, field) in sys.fields.iter().enumerate() {
         let mut pts: Vec<(f64, f64, usize)> = Vec::new();
         let mut launched = 0usize;
+
         for (wi, w) in request.system.wavelengths.iter().enumerate() {
             let par_w = Paraxial::compute(&sys, *w);
-            for a in 0..grid {
-                for b in 0..grid {
-                    let px = -1.0 + 2.0 * (a as f64 + 0.5) / grid as f64;
-                    let py = -1.0 + 2.0 * (b as f64 + 0.5) / grid as f64;
-                    if px * px + py * py > 1.0 {
-                        continue;
-                    }
-                    launched += 1;
-                    if let Some(p) =
-                        trace(&sys, *w, launch(&sys, &par_w, *field, px, py)).image_point()
-                    {
-                        pts.push((p.x, p.y, wi));
-                    }
+
+            // Distortion: the real chief ray against the paraxial prediction.
+            let paraxial_height = par_w.image_height(&sys, *w, *field);
+            if paraxial_height.abs() > 1e-9 {
+                if let Some(p) =
+                    trace(&sys, *w, launch(&sys, &par_w, *field, 0.0, 0.0)).image_point()
+                {
+                    let real = (p.x * p.x + p.y * p.y).sqrt() * paraxial_height.signum();
+                    distortion.push(DistortionPoint {
+                        field_index: fi,
+                        wavelength: *w,
+                        percent: 100.0 * (real - paraxial_height) / paraxial_height,
+                    });
+                }
+            }
+
+            for (px, py) in &pupil {
+                launched += 1;
+                if let Some(p) =
+                    trace(&sys, *w, launch(&sys, &par_w, *field, *px, *py)).image_point()
+                {
+                    pts.push((p.x, p.y, wi));
                 }
             }
         }
 
+        let spec = field_specs.get(fi).copied().unwrap_or_default();
         if pts.is_empty() {
             warnings.push(format!(
-                "no ray reached the image plane at {:.1} degrees",
-                fields[fi]
+                "no ray reached the image plane at field {:.1}, {:.1}",
+                spec.x, spec.y
             ));
             spots.push(Spot {
-                field: fields[fi],
+                field: spec,
+                field_index: fi,
                 rms: f64::NAN,
                 geometric: f64::NAN,
                 airy: 1.22 * wl * par.fno,
@@ -408,7 +651,8 @@ pub fn analyze(request: &Request) -> Result<Analysis, String> {
             .collect();
 
         spots.push(Spot {
-            field: fields[fi],
+            field: spec,
+            field_index: fi,
             rms: (sum2 / k).sqrt(),
             geometric: worst,
             airy: 1.22 * wl * par.fno,
@@ -421,9 +665,10 @@ pub fn analyze(request: &Request) -> Result<Analysis, String> {
     for s in &spots {
         if s.throughput > 0.0 && s.throughput < 0.98 {
             warnings.push(format!(
-                "{:.0}% of rays are vignetted at {:.1} degrees",
+                "{:.0}% of rays are vignetted at field {:.1}, {:.1}",
                 100.0 * (1.0 - s.throughput),
-                s.field
+                s.field.x,
+                s.field.y
             ));
         }
     }
@@ -440,10 +685,17 @@ pub fn analyze(request: &Request) -> Result<Analysis, String> {
         )
         .max(1e-3);
 
-    // Report back the prescription actually analysed, so a refocus is visible in the editor.
+    // Report back the prescription actually analysed, so solved thicknesses and a
+    // refocus are visible in the editor rather than silently applied.
     let mut echoed = request.system.clone();
-    for (spec, surf) in echoed.surfaces.iter_mut().zip(sys.surfaces.iter()) {
-        spec.thickness = surf.thickness;
+    for ((spec, surf), thickness) in echoed
+        .surfaces
+        .iter_mut()
+        .zip(sys.surfaces.iter())
+        .zip(design_thicknesses.iter())
+    {
+        spec.thickness = *thickness;
+        spec.solve = SolveSpec::from_core(surf.thickness_solve);
     }
 
     Ok(Analysis {
@@ -465,6 +717,8 @@ pub fn analyze(request: &Request) -> Result<Analysis, String> {
             bounds: [z_start, -y_max * 1.15, image_z, y_max * 1.15],
         },
         spots,
+        distortion,
+        primary_wavelength: wl,
         warnings,
         system: echoed,
     })
@@ -516,6 +770,7 @@ fn spec_of(sys: &System<f64>) -> SystemSpec {
                 semi_diameter: s.semi_diameter,
                 conic,
                 stop: s.is_stop,
+                solve: SolveSpec::from_core(s.thickness_solve),
                 label: s.label.clone(),
             }
         })
@@ -528,7 +783,14 @@ fn spec_of(sys: &System<f64>) -> SystemSpec {
             _ => 10.0,
         },
         wavelengths: sys.wavelengths.iter().map(|w| w.um).collect(),
-        fields: sys.fields.iter().map(|f| f.radius()).collect(),
+        primary_wavelength: Some(sys.wavelengths.len() / 2),
+        fields: sys
+            .fields
+            .iter()
+            .map(|f| match *f {
+                Field::Angle { x, y } | Field::Height { x, y } => FieldSpec { x, y },
+            })
+            .collect(),
         surfaces,
     }
 }
@@ -571,6 +833,8 @@ mod tests {
             rays_per_fan: 9,
             spot_grid: 15,
             refocus: false,
+            pupil_pattern: PupilPattern::Square,
+            defocus: 0.0,
         })
         .expect("analysis succeeded")
     }
@@ -656,7 +920,7 @@ mod tests {
             a.layout
                 .rays
                 .iter()
-                .filter(|r| r.field == 0.0)
+                .filter(|r| r.field_index == 0)
                 .all(|r| r.complete),
             "an axial ray was blocked"
         );
@@ -696,31 +960,87 @@ mod tests {
     }
 
     #[test]
-    fn refocusing_reports_the_thickness_it_changed() {
+    fn a_solved_thickness_ignores_a_typed_value() {
+        // The Cooke preset autofocuses. Typing a different image distance must have no
+        // effect, because the solve owns that number -- and the editor must be told the
+        // value that was actually used, not the one that was typed.
         let mut spec = cooke();
         let last = spec.surfaces.len() - 2;
-        spec.surfaces[last].thickness += 3.0; // throw the image plane out of focus
+        assert!(
+            !matches!(spec.surfaces[last].solve, SolveSpec::Fixed),
+            "the preset should ship with a solve"
+        );
 
-        let blurred = run(spec.clone());
-        let refocused = analyze(&Request {
-            system: spec,
+        let focused = run(spec.clone());
+        spec.surfaces[last].thickness += 3.0;
+        let edited = run(spec.clone());
+
+        assert!(
+            (edited.spots[0].rms - focused.spots[0].rms).abs() < 1e-9,
+            "the typed thickness defeated the solve: {} vs {}",
+            focused.spots[0].rms,
+            edited.spots[0].rms
+        );
+        assert!(
+            (edited.system.surfaces[last].thickness - 42.436702).abs() < 1e-3,
+            "the echoed thickness is the typed one, not the solved one: {}",
+            edited.system.surfaces[last].thickness
+        );
+    }
+
+    #[test]
+    fn releasing_the_solve_hands_the_thickness_back() {
+        let mut spec = cooke();
+        let last = spec.surfaces.len() - 2;
+        spec.surfaces[last].solve = SolveSpec::Fixed;
+        spec.surfaces[last].thickness = 45.0;
+
+        let a = run(spec);
+        assert!((a.system.surfaces[last].thickness - 45.0).abs() < 1e-12);
+        assert!(a.spots[0].rms > 100.0, "45 mm should be badly defocused");
+    }
+
+    #[test]
+    fn defocus_blurs_without_editing_the_prescription() {
+        // Exploring focus must not alter the design, and must not fight the solve.
+        let spec = cooke();
+        let sharp = run(spec.clone());
+        let shifted = analyze(&Request {
+            system: spec.clone(),
             rays_per_fan: 9,
             spot_grid: 15,
-            refocus: true,
+            refocus: false,
+            pupil_pattern: PupilPattern::Square,
+            defocus: 1.5,
         })
         .unwrap();
 
         assert!(
-            refocused.spots[0].rms < blurred.spots[0].rms * 0.5,
-            "refocusing did not sharpen the axial spot: {} -> {}",
-            blurred.spots[0].rms,
-            refocused.spots[0].rms
+            shifted.spots[0].rms > sharp.spots[0].rms * 2.0,
+            "1.5 mm of defocus barely changed the spot: {} -> {}",
+            sharp.spots[0].rms,
+            shifted.spots[0].rms
         );
-        // The echoed prescription must show the new thickness, so the editor can display it.
+        let last = spec.surfaces.len() - 2;
+        assert_eq!(
+            shifted.system.surfaces[last].thickness, sharp.system.surfaces[last].thickness,
+            "defocus edited the prescription"
+        );
+    }
+
+    #[test]
+    fn a_solve_holds_focus_when_the_design_changes() {
+        let mut spec = cooke();
+        let sharp = run(spec.clone());
+        spec.surfaces[0].radius = Some(spec.surfaces[0].radius.unwrap() * 1.05);
+        let moved = run(spec);
+        // A 5% radius change would ruin an unsolved system; with autofocus the axial
+        // spot stays in the same order of magnitude.
         assert!(
-            (refocused.system.surfaces[last].thickness - 42.436702).abs() < 1e-3,
-            "echoed thickness {}",
-            refocused.system.surfaces[last].thickness
+            moved.spots[0].rms < sharp.spots[0].rms * 3.0,
+            "autofocus did not hold: {} -> {}",
+            sharp.spots[0].rms,
+            moved.spots[0].rms
         );
     }
 
@@ -835,7 +1155,8 @@ mod tests {
             title: "Concave mirror".into(),
             entrance_pupil_diameter: 20.0,
             wavelengths: vec![0.5875618],
-            fields: vec![0.0],
+            primary_wavelength: None,
+            fields: vec![FieldSpec::default()],
             surfaces: vec![
                 SurfaceSpec {
                     radius: Some(-200.0),
@@ -844,6 +1165,7 @@ mod tests {
                     semi_diameter: Some(15.0),
                     conic: -1.0,
                     stop: true,
+                    solve: SolveSpec::Fixed,
                     label: "primary".into(),
                 },
                 SurfaceSpec {
@@ -853,6 +1175,7 @@ mod tests {
                     semi_diameter: None,
                     conic: 0.0,
                     stop: false,
+                    solve: SolveSpec::Fixed,
                     label: "image".into(),
                 },
             ],

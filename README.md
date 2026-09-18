@@ -28,7 +28,10 @@ layout, spot diagrams and first-order data update as you type.
 - Sellmeier, Schott, model-glass and fixed-index dispersion, with a small verified catalog
 - **Exact derivatives** of any traced quantity with respect to any design parameter,
   from a single trace, via forward-mode automatic differentiation
-- Spot diagrams, scale layout drawings with vignetting shown, and a browser demo
+- Thickness solves — marginal ray height, chief ray height and pickups — resolved to a
+  fixed point before tracing, with derivatives flowing through them
+- Spot diagrams with three pupil sampling patterns, distortion per field and wavelength,
+  scale layout drawings with vignetting shown, and a browser demo
 
 ## Try it
 
@@ -44,7 +47,7 @@ python3 -m http.server -d web 8080     # then open http://localhost:8080
 
 ## Verification
 
-125 tests, in two layers. **Unit tests** live beside the code they cover, one module at a
+137 tests, in two layers, plus 32 headless checks of the browser demo. **Unit tests** live beside the code they cover, one module at a
 time, and can reach private functions: dual-number calculus, vector and transform algebra,
 dispersion formulae, sag and intersection geometry, the paraxial marching step, and the
 tracer's refraction, reflection, clipping and path-length bookkeeping. **Integration
@@ -62,6 +65,8 @@ kernel's own past output:
 | Lagrange invariant across the system | conserved to 1e-10 relative |
 | Real vs. paraxial rays as aperture and field shrink | converges at exactly third order |
 | Autodiff gradients vs. central differences | agree to 1e-5 relative |
+| Autofocus solve vs. the computed back focal distance | agree to 1e-10 |
+| Derivatives through a solved thickness | agree with central differences to 1e-5 |
 | Thin lens vs. the lensmaker's equation | 4 configurations, to 1e-9 |
 | Concave mirror focal length vs. `R/2` | to 1e-10 |
 | Plane-parallel plate displacement vs. `t(tan A - tan A')` | to 1e-12 |

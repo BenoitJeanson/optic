@@ -12,6 +12,7 @@
 
 use crate::material::Material;
 use crate::math::{Scalar, Transform};
+use crate::solve::ThicknessSolve;
 use crate::surface::Profile;
 
 /// Where the object lives.
@@ -31,7 +32,14 @@ pub enum Object<S: Scalar> {
 pub struct Surface<S: Scalar> {
     pub profile: Profile<S>,
     /// Axial distance to the next surface.
+    ///
+    /// When [`Surface::thickness_solve`] is not `Fixed`, this holds the *solved* value:
+    /// the solve writes here, so everything downstream reads a thickness without caring
+    /// whether a person or a constraint put it there.
     pub thickness: S,
+    /// How `thickness` is determined.
+    #[cfg_attr(feature = "serde", serde(default = "ThicknessSolve::default"))]
+    pub thickness_solve: ThicknessSolve<S>,
     /// The medium *after* this surface.
     pub material: Material,
     /// Clear semi-aperture. `None` means "as large as needed", resolved by ray tracing.
@@ -47,6 +55,7 @@ impl<S: Scalar> Surface<S> {
         Self {
             profile: Profile::sphere(radius),
             thickness: S::from_f64(thickness),
+            thickness_solve: ThicknessSolve::Fixed,
             material,
             semi_diameter: None,
             is_stop: false,
@@ -72,6 +81,17 @@ impl<S: Scalar> Surface<S> {
     pub fn with_semi_diameter(mut self, sd: f64) -> Self {
         self.semi_diameter = Some(S::from_f64(sd));
         self
+    }
+
+    /// Let a constraint determine this thickness instead of a typed value.
+    pub fn solved_by(mut self, solve: ThicknessSolve<S>) -> Self {
+        self.thickness_solve = solve;
+        self
+    }
+
+    /// Autofocus: place the next surface where the paraxial marginal ray crosses the axis.
+    pub fn autofocus(self) -> Self {
+        self.solved_by(ThicknessSolve::MarginalRayHeight { height: S::zero() })
     }
 }
 

@@ -29,6 +29,46 @@ lens design.
 | Zemax `.zmx` import | Early — it is the adoption lever |
 | Licence | Apache-2.0 |
 
+## Decisions from Elias
+
+Answers to the opening questions, recorded here because they are binding.
+
+| Question | Answer |
+|---|---|
+| Reference designs | **W. Smith, *Modern Lens Design*** — the source his practical work used. Malacara's *Handbook of Optical Design*, Kingslake's *Lens Design Fundamentals* and Geary's *Introduction to Lens Design* give analytical treatments of the Cooke triplet worth checking against |
+| Agreement tolerance | **±0.5%** against published values |
+| Pupil model | **Vignetting factors, as in Zemax** — not physical apertures |
+| Sign conventions | **Zemax's**, throughout |
+| Aspheres | Needs the **r² term**, and **Forbes Q-type** kept |
+| Glasses | **Schott** mainly, other vendors useful, **no obsolete glasses**. **Temperature-dependent index is required**, not optional |
+| Merit function | Wizard-built base (usually RMS spot) **plus hand-added operands**. Wants the full Zemax operand set, and is open to new ones — he suggested wavefront quality on a surface other than the image |
+| File format | **`.zmx` only** |
+
+The analyses he actually uses, which is the M1 list: layout (2D and 3D), spot diagrams,
+MTF, Seidel diagram and coefficients, ray fan, footprint, field curvature and distortion,
+grid distortion, longitudinal aberration, lateral colour, chromatic focal shift, wavefront
+map, interferogram, PSF.
+
+### The open discrepancy
+
+Elias analysed a 50 mm f/5 triplet and got RMS spot radii of 13.819 µm on axis and
+32.843 µm at 20°, with distortion of +0.1389% at the primary line. This kernel gives
+13.5 µm, 23.0 µm and +0.1153%.
+
+The 20° difference is **not** explained by any setting. Removing every aperture so nothing
+is vignetted moves it by 1.4%; sampling is converged from 531 rays to 15,491; using one
+wavelength instead of three moves it the wrong way. Nothing reaches 32.8 µm.
+
+Distortion settles it. It is a **chief-ray** property — one ray through the centre of the
+pupil — so it cannot depend on aperture, vignetting factors, ray aiming or pupil sampling.
+Two tools that disagree about distortion are not disagreeing about settings; they are
+describing different lenses. Since the sample prescription here was constructed to be
+physically sound rather than transcribed from a publication, the likeliest explanation by
+far is that it is not the same triplet.
+
+**Resolving this needs his prescription**, not more analysis. Which is also the argument
+for pulling `.zmx` import forward: every file he has becomes an exact comparison.
+
 ## Layering
 
 ```
@@ -63,11 +103,20 @@ let y = trace(&sys, wl, ray).image_point().unwrap().y;
 let [dy_dc, dy_dt] = *y.grad();                      // exact, not finite-differenced
 ```
 
-Zemax computes merit-function Jacobians by finite differences, which costs one extra trace
-per variable and forces a step-size compromise between truncation and rounding error. We
-get exact derivatives instead. This makes damped least squares — which *is*
-Levenberg–Marquardt — faster and more robust, and hands us tolerance sensitivities for
-free.
+Zemax computes merit-function Jacobians by finite differences, which forces a step-size
+compromise between truncation and rounding error — one that is hardest to get right for
+high-order aspheric coefficients. We get exact derivatives instead, with no step to tune.
+Both approaches scale as `O(n)` in the number of variables; what dual numbers save is a
+constant factor, because control flow, the value part and shared work are done once in a
+single pass rather than `n + 1` times. The result is that damped least squares — which
+*is* Levenberg–Marquardt — gets a cleaner, somewhat cheaper Jacobian, and the same
+machinery hands us tolerance sensitivities.
+
+The price is that this only works because every routine on the path from a variable to a
+residual is generic over `Scalar`. A finite-difference optimizer can treat the merit
+function as a black box — user DLLs, macros, arbitrary operands — and we cannot. Any
+iterative solve or non-smooth step (ray aiming, clipping, vignetting) also has to be
+differentiated deliberately rather than inherited for free.
 
 Forward mode rather than reverse is deliberate. Lens design has few variables (tens:
 curvatures, thicknesses, conics, aspheric coefficients) and many residuals (thousands: ray
@@ -122,9 +171,10 @@ They are not claims about published designs.
   This is the single most invasive feature to retrofit, hence the early indirection.
 - **Mirrors.** Signed indices track reflection parity through the paraxial trace. Untested;
   no sample uses one yet.
-- **Solves and pickups.** Marginal-ray-height solves, f-number solves, parameter pickups.
-  These turn the document into a small dependency graph that must be evaluated before
-  every trace. Retrofitting that is painful, so it goes into the data model early.
+- **Solves.** Built: marginal-ray-height, chief-ray-height and pickups on thicknesses,
+  evaluated to a fixed point before any ray is traced, with derivatives flowing through
+  them so the optimiser sees a solved thickness's true sensitivity. Still to come:
+  solves on curvature and on glass, and f-number solves.
 - **Real ray aiming.** Rays are currently aimed at the *paraxial* entrance pupil, so a
   system with strong pupil aberration will not have its pupil filled uniformly. The
   interface does not change when real aiming arrives.
@@ -145,10 +195,14 @@ from refractiveindex.info, which is CC0.
 
 - **M0** — sequential trace, conic and aspheric surfaces, catalog glasses, spot diagrams,
   ray fans, layout. CLI and Python only. *In progress.*
-- **M1** — optimisation: variables, solves, merit operands, Levenberg–Marquardt with
-  analytic Jacobians. Zernike and Seidel coefficients, OPD, MTF.
-- **M2** — the desktop application, with live-updating analysis windows. `.zmx` import.
-- **M3** — tolerancing (sensitivity and Monte Carlo), coatings, polarisation, thermal.
+- **M1** — optimisation: variables, merit operands (the Zemax set), Levenberg–Marquardt
+  with analytic Jacobians. Vignetting factors. The analysis list above, starting with
+  Seidel, MTF, ray fans and field curvature. Aspheric r² term and Forbes Q-type.
+- **M2** — the desktop application, with live-updating analysis windows. `.zmx` import,
+  pulled forward: it is the only format he has, and it is how we settle whether this
+  kernel agrees with Zemax on a prescription we both hold.
+- **M3** — tolerancing (sensitivity and Monte Carlo), coatings, polarisation. Thermal
+  moves earlier if temperature work blocks him.
 - **M4** — non-sequential mode: sources, detectors, scattering, stray light.
 - **M5** — physical optics propagation, Gaussian beams, CAD and ISO 10110 export.
 

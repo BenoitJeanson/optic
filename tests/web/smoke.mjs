@@ -138,29 +138,104 @@ radius.dispatchEvent(new window.Event("input", { bubbles: true }));
 await settle();
 check("restoring the radius restores the focal length", Math.abs(efl() - before) < 1e-6);
 
-// The defocus slider must move the image plane and blur the spot.
+// Defocus must blur the spot WITHOUT editing the design: it is a question asked of the
+// prescription, not a change to it, and it must not fight the autofocus solve.
 const thicknessCell = () =>
   Number(doc.querySelector('#prescription input[data-field="thickness"][data-row="6"]').value);
+const rms = () => {
+  const m = doc.querySelector("#spots .metrics").textContent.match(/RMS ([\d.]+)/);
+  return m ? Number(m[1]) : NaN;
+};
+
 const focusBefore = thicknessCell();
+const sharp = rms();
 const slider = doc.getElementById("defocus");
 slider.value = "1.5";
 slider.dispatchEvent(new window.Event("input", { bubbles: true }));
 await settle();
-check(
-  "the defocus slider moves the image plane",
-  Math.abs(thicknessCell() - focusBefore - 1.5) < 1e-6,
-  `${focusBefore} -> ${thicknessCell()}`,
-);
+check("defocus blurs the spot", rms() > sharp * 2, `${sharp} -> ${rms()}`);
+check("defocus leaves the prescription alone", thicknessCell() === focusBefore, `${thicknessCell()}`);
 check("the defocus readout updates", text("defocus-value").includes("1.50"));
 
-// Refocus must put it back.
 doc.getElementById("refocus").click();
 await settle();
+check("refocus restores the sharp spot", Math.abs(rms() - sharp) < 0.1, `${rms()}`);
+
+// Solves must be visible and editable — Elias asked for exactly this.
+const solveSelect = doc.querySelector('#prescription select[data-field="solve"][data-row="6"]');
+check("the image distance shows its solve", solveSelect?.value === "marginal_ray_height", solveSelect?.value);
 check(
-  "refocus returns the image plane to the paraxial focus",
-  Math.abs(thicknessCell() - focusBefore) < 1e-3,
-  `${thicknessCell()}`,
+  "a solved thickness is read-only",
+  doc.querySelector('#prescription input[data-field="thickness"][data-row="6"]').readOnly,
 );
+
+solveSelect.value = "fixed";
+solveSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+await settle();
+check(
+  "releasing the solve makes the thickness editable",
+  !doc.querySelector('#prescription input[data-field="thickness"][data-row="6"]').readOnly,
+);
+solveSelect.value = "marginal_ray_height";
+solveSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+await settle();
+check("the solve can be put back", Math.abs(thicknessCell() - focusBefore) < 1e-6, `${thicknessCell()}`);
+
+// The primary wavelength must be shown and changeable.
+const primary = doc.getElementById("primary");
+check("the primary wavelength is offered", primary.options.length === 3, `${primary.options.length}`);
+check("it defaults to the middle line", text("first-order").includes("0.5876"));
+primary.value = "0";
+primary.dispatchEvent(new window.Event("change", { bubbles: true }));
+await settle();
+check("changing the primary wavelength takes effect", text("first-order").includes("0.4861"));
+primary.value = "1";
+primary.dispatchEvent(new window.Event("change", { bubbles: true }));
+await settle();
+
+// Fields must say which way they point. The on-axis field has no direction, so the
+// label to inspect is one of the off-axis ones.
+const offAxisLabel = () => [...doc.querySelectorAll(".field-label")].pop().textContent;
+check("field labels name their axis", /Y\s*2?0\.0/.test(offAxisLabel()), offAxisLabel());
+const axis = doc.getElementById("field-axis");
+axis.value = "x";
+axis.dispatchEvent(new window.Event("change", { bubbles: true }));
+await settle();
+check("switching the field axis to X is reflected", /X\s*2?0\.0/.test(offAxisLabel()), offAxisLabel());
+axis.value = "y";
+axis.dispatchEvent(new window.Event("change", { bubbles: true }));
+await settle();
+
+// Pupil sampling patterns.
+const pattern = doc.getElementById("pupil-pattern");
+const rmsSquare = rms();
+for (const p of ["hexapolar", "dithered"]) {
+  pattern.value = p;
+  pattern.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await settle();
+  check(`${p} sampling produces a spot`, Number.isFinite(rms()) && rms() > 1, `RMS ${rms()}`);
+  check(`${p} agrees with the square grid to within 10%`,
+    Math.abs(rms() - rmsSquare) / rmsSquare < 0.1, `${rmsSquare} vs ${rms()}`);
+}
+pattern.value = "square";
+pattern.dispatchEvent(new window.Event("change", { bubbles: true }));
+await settle();
+
+// The Airy disc toggle.
+const airy = doc.getElementById("show-airy");
+check("the Airy disc is on by default", airy.checked);
+const arcsWith = contexts.get(doc.getElementById("spot-0")).calls.arc;
+airy.checked = false;
+airy.dispatchEvent(new window.Event("change", { bubbles: true }));
+await settle();
+check("toggling the Airy disc redraws", contexts.get(doc.getElementById("spot-0")).calls.arc > arcsWith);
+
+// Distortion, per field and wavelength.
+const distortion = doc.getElementById("distortion");
+check("distortion is tabulated", !distortion.hidden && distortion.rows.length >= 3,
+  `${distortion.rows.length} rows`);
+check("distortion covers every wavelength", distortion.rows[0].cells.length === 4,
+  `${distortion.rows[0].cells.length} columns`);
 
 // Switching preset must rebuild everything.
 const preset = doc.getElementById("preset");
