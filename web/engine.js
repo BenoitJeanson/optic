@@ -53,6 +53,31 @@ export class OpticEngine {
     return this.#readResult(result);
   }
 
+  /**
+   * Read a `.zmx` file into a prescription.
+   *
+   * Takes raw bytes, not text: Zemax has written both UTF-16LE and UTF-8, and which
+   * one it is has to be decided from the bytes themselves.
+   */
+  importZmx(bytes) {
+    const data = new Uint8Array(bytes);
+    const ptr = this.#exports.optic_alloc(data.length);
+    new Uint8Array(this.#exports.memory.buffer, ptr, data.length).set(data);
+    const result = this.#exports.optic_import_zmx(ptr, data.length);
+    this.#exports.optic_free(ptr, data.length);
+    return this.#readResult(result);
+  }
+
+  /** Write a prescription out as `.zmx`, for checking in Zemax. */
+  exportZmx(system) {
+    const bytes = ENCODER.encode(JSON.stringify(system));
+    const ptr = this.#exports.optic_alloc(bytes.length);
+    new Uint8Array(this.#exports.memory.buffer, ptr, bytes.length).set(bytes);
+    const result = this.#exports.optic_export_zmx(ptr, bytes.length);
+    this.#exports.optic_free(ptr, bytes.length);
+    return this.#readResult(result);
+  }
+
   #readResult(ptr) {
     const memory = this.#exports.memory.buffer;
     const length = new DataView(memory).getUint32(ptr, true);

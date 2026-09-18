@@ -83,6 +83,18 @@
           <tbody id="prescription"></tbody>
         </table>
 
+        <div class="interop">
+          <label class="file">
+            <input id="zmx-file" type="file" accept=".zmx,.ZMX" />
+            <span>Open a .zmx file</span>
+          </label>
+          <button id="zmx-export" type="button">Save as .zmx</button>
+        </div>
+        <p class="interop-note">
+          Zemax files are read here on your machine &mdash; nothing is uploaded. Exporting
+          lets you check these numbers in Zemax against the same prescription.
+        </p>
+
         <ul id="warnings" class="warnings" hidden></ul>
       </section>
 

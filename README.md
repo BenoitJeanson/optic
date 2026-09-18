@@ -30,6 +30,8 @@ layout, spot diagrams and first-order data update as you type.
   from a single trace, via forward-mode automatic differentiation
 - Thickness solves — marginal ray height, chief ray height and pickups — resolved to a
   fixed point before tracing, with derivatives flowing through them
+- **Zemax `.zmx` import and export**, including UTF-16 files, six-digit glass codes, and
+  an explicit list of anything the file used that we do not yet model
 - Spot diagrams with three pupil sampling patterns, distortion per field and wavelength,
   scale layout drawings with vignetting shown, and a browser demo
 
@@ -47,7 +49,7 @@ python3 -m http.server -d web 8080     # then open http://localhost:8080
 
 ## Verification
 
-137 tests, in two layers, plus 32 headless checks of the browser demo. **Unit tests** live beside the code they cover, one module at a
+165 tests, in three layers, plus 39 headless checks of the browser demo. **Unit tests** live beside the code they cover, one module at a
 time, and can reach private functions: dual-number calculus, vector and transform algebra,
 dispersion formulae, sag and intersection geometry, the paraxial marching step, and the
 tracer's refraction, reflection, clipping and path-length bookkeeping. **Integration
@@ -66,12 +68,23 @@ kernel's own past output:
 | Real vs. paraxial rays as aperture and field shrink | converges at exactly third order |
 | Autodiff gradients vs. central differences | agree to 1e-5 relative |
 | Autofocus solve vs. the computed back focal distance | agree to 1e-10 |
+| **EP 155,640 (1919) triplet** vs. its published focal length | within the source's rounding |
+| **DE 287,089 (1913) triplet** vs. its published focal length | within the source's rounding |
+| Distortion of both, vs. their published plots | right sign and magnitude |
+| `.zmx` round trip | focal length preserved exactly |
 | Derivatives through a solved thickness | agree with central differences to 1e-5 |
 | Thin lens vs. the lensmaker's equation | 4 configurations, to 1e-9 |
 | Concave mirror focal length vs. `R/2` | to 1e-10 |
 | Plane-parallel plate displacement vs. `t(tan A - tan A')` | to 1e-12 |
 | A chief ray aimed at the entrance pupil | crosses the axis at the stop, to 1e-12 |
 | Paraxial trace reversed through `backward` | returns the launch state, to 1e-12 |
+
+Two published triplets are reproduced to within the precision of the source. Because the
+prescriptions are printed to one decimal place, agreement is judged against a budget
+computed from the data itself: the focal length is differentiated with respect to all
+eleven rounded quantities at once, and the disagreement must fit inside what ±0.05 on
+each can produce. That is the differentiable kernel earning its keep on a question it
+was not built for.
 
 The third-order convergence result is the load-bearing one: halving both aperture and
 field divides the real-versus-paraxial disagreement by eight, which is what aberration
@@ -88,7 +101,8 @@ formatting, clippy, a minimum-supported-Rust-version check, and a WebAssembly bu
 ## Layout
 
 ```
-crates/optic-core    the kernel: geometry, materials, tracing, paraxial optics
+crates/optic-core    the kernel: geometry, materials, tracing, paraxial optics, solves
+crates/optic-io      reading and writing prescriptions: Zemax .zmx in and out
 crates/optic-wasm    a JSON analysis API over it, and the C ABI the browser calls
 web/                 the demo page -- plain ES modules, no build step
 tests/web            headless smoke test for the page

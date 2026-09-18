@@ -255,5 +255,44 @@ glass.dispatchEvent(new window.Event("change", { bubbles: true }));
 await settle();
 check("a mirror in place of glass still analyses", doc.getElementById("error").hidden);
 
+// Zemax interchange. The DOM plumbing is checked for presence; the load-bearing part is
+// the engine round trip, which is exercised directly.
+check("the page offers to open a .zmx file", !!doc.getElementById("zmx-file"));
+check("the page offers to save one", !!doc.getElementById("zmx-export"));
+
+const { OpticEngine } = await import(pathToFileURL(resolve(webDir, "engine.js")).href);
+const engine = await OpticEngine.fromBytes(readFileSync(resolve(webDir, "optic_wasm.wasm")));
+const { presets } = engine.presets();
+
+check("the published reference designs are offered", presets.length >= 4, `${presets.length} presets`);
+check(
+  "one of them cites its patent",
+  presets.some((p) => /155,640|287,089/.test(p.title)),
+  presets.map((p) => p.title).join(" | "),
+);
+
+const exported = engine.exportZmx(presets[0]);
+check("a prescription exports to .zmx", exported.ok && exported.text.startsWith("VERS "));
+
+const reimported = engine.importZmx(new TextEncoder().encode(exported.text));
+check("and reads back in", reimported.ok, reimported.error ?? "");
+if (reimported.ok) {
+  const before = engine.analyze({ system: presets[0], rays_per_fan: 5, spot_grid: 9 });
+  const after = engine.analyze({ system: reimported.system, rays_per_fan: 5, spot_grid: 9 });
+  check(
+    "the round trip preserves the focal length",
+    Math.abs(before.first_order.efl - after.first_order.efl) < 1e-6,
+    `${before.first_order.efl} vs ${after.first_order.efl}`,
+  );
+}
+
+const utf16 = [0xff, 0xfe];
+for (const unit of exported.text) {
+  const c = unit.charCodeAt(0);
+  utf16.push(c & 0xff, c >> 8);
+}
+check("UTF-16 files are handled", engine.importZmx(new Uint8Array(utf16)).ok);
+check("junk is refused politely", engine.importZmx(new TextEncoder().encode("hello")).ok === false);
+
 console.log(`\n${failures === 0 ? "all checks passed" : `${failures} check(s) failed`}\n`);
 process.exit(failures === 0 ? 0 : 1);

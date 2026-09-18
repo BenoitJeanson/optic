@@ -33,8 +33,10 @@ pub enum Profile<S: Scalar> {
     /// Sphere or conic of revolution: `curvature` is `1/R` (zero for flat), `conic` is
     /// the Schwarzschild constant `k` (0 sphere, -1 paraboloid, `k < -1` hyperboloid).
     Conic { curvature: S, conic: S },
-    /// A conic plus an even polynomial. `coeffs[i]` multiplies `r^(2i+4)`, so the list
-    /// reads as the familiar A4, A6, A8, ... of a lens prescription.
+    /// A conic plus an even polynomial, in Zemax's ordering: `coeffs[i]` multiplies
+    /// `r^(2i+2)`, so the list reads as alpha-1 (on `r^2`), alpha-2 (on `r^4`), and so
+    /// on. The `r^2` term is not cosmetic -- it changes the vertex curvature, and so the
+    /// first-order properties of the whole system.
     EvenAsphere {
         curvature: S,
         conic: S,
@@ -80,7 +82,7 @@ impl<S: Scalar> Profile<S> {
                 coeffs,
             } => {
                 let mut z = conic_sag(*curvature, *conic, r2)?;
-                let mut p = r2 * r2; // r^4
+                let mut p = r2; // r^2
                 for a in coeffs {
                     z += *a * p;
                     p *= r2;
@@ -101,9 +103,10 @@ impl<S: Scalar> Profile<S> {
                 coeffs,
             } => {
                 let mut d = conic_dsag(*curvature, *conic, r2)?;
-                let mut p = r2; // r^(2i+2), so that d/d(r2) of r^(2i+4) is (i+2) r^(2i+2)
+                // d/d(r2) of r^(2i+2) is (i+1) r^(2i).
+                let mut p = S::one();
                 for (i, a) in coeffs.iter().enumerate() {
-                    d += *a * S::from_f64((i + 2) as f64) * p;
+                    d += *a * S::from_f64((i + 1) as f64) * p;
                     p *= r2;
                 }
                 Ok(d)
@@ -245,10 +248,20 @@ fn conic_dsag<S: Scalar>(c: S, k: S, r2: S) -> Result<S, MissReason> {
 impl<S: Scalar> Profile<S> {
     /// Curvature at the vertex, which is all the paraxial trace sees.
     ///
-    /// With aspheric terms starting at `r^4`, the polynomial contributes nothing to
-    /// second order, so this is just the base curvature.
+    /// Near the axis a surface behaves as `z = r^2 / (2 R)`, so the base conic
+    /// contributes `c/2` and an `r^2` aspheric coefficient contributes itself. The
+    /// effective curvature is therefore `c + 2 * alpha_1`. Every higher term is
+    /// fourth order or beyond and is invisible to first-order optics.
     pub fn paraxial_curvature(&self) -> S {
-        self.curvature()
+        match self {
+            Profile::EvenAsphere {
+                curvature, coeffs, ..
+            } => match coeffs.first() {
+                Some(a1) => *curvature + S::two() * *a1,
+                None => *curvature,
+            },
+            _ => self.curvature(),
+        }
     }
 }
 
@@ -387,22 +400,46 @@ mod tests {
     }
 
     #[test]
-    fn aspheric_coefficients_read_as_a4_a6_a8() {
-        // coeffs[i] multiplies r^(2i+4), so a flat base plus a single term is pure r^4.
-        let p: Profile<f64> = Profile::EvenAsphere {
-            curvature: 0.0,
-            conic: 0.0,
-            coeffs: vec![1e-4],
-        };
+    fn aspheric_coefficients_follow_zemax_ordering() {
+        // coeffs[i] multiplies r^(2i+2): alpha-1 on r^2, alpha-2 on r^4, and so on.
         let r: f64 = 3.0;
-        assert!((p.sag(r * r).unwrap() - 1e-4 * r.powi(4)).abs() < 1e-15);
+        for (i, power) in [(0usize, 2i32), (1, 4), (2, 6), (3, 8)] {
+            let mut coeffs = vec![0.0; i + 1];
+            coeffs[i] = 1e-4;
+            let p: Profile<f64> = Profile::EvenAsphere {
+                curvature: 0.0,
+                conic: 0.0,
+                coeffs,
+            };
+            let expected = 1e-4 * r.powi(power);
+            assert!(
+                (p.sag(r * r).unwrap() - expected).abs() < 1e-18,
+                "coeffs[{i}] should drive r^{power}"
+            );
+        }
+    }
 
-        let q: Profile<f64> = Profile::EvenAsphere {
-            curvature: 0.0,
+    #[test]
+    fn an_r2_coefficient_changes_the_vertex_curvature() {
+        // This is why the r^2 term cannot be treated as decoration: it moves the
+        // first-order properties of the whole system.
+        let plain: Profile<f64> = Profile::Conic {
+            curvature: 0.01,
             conic: 0.0,
-            coeffs: vec![0.0, 2e-6],
         };
-        assert!((q.sag(r * r).unwrap() - 2e-6 * r.powi(6)).abs() < 1e-18);
+        let with_r2: Profile<f64> = Profile::EvenAsphere {
+            curvature: 0.01,
+            conic: 0.0,
+            coeffs: vec![0.002],
+        };
+        assert_eq!(plain.paraxial_curvature(), 0.01);
+        assert_eq!(with_r2.paraxial_curvature(), 0.01 + 2.0 * 0.002);
+
+        // And the sag must agree with the curvature it claims, close to the axis.
+        let r = 1e-4;
+        let sag = with_r2.sag(r * r).unwrap();
+        let expected = with_r2.paraxial_curvature() * r * r / 2.0;
+        assert!((sag - expected).abs() < 1e-18, "{sag} vs {expected}");
     }
 
     #[test]
@@ -423,13 +460,28 @@ mod tests {
     }
 
     #[test]
-    fn paraxial_curvature_ignores_the_polynomial() {
-        let p: Profile<f64> = Profile::EvenAsphere {
+    fn paraxial_curvature_sees_the_r2_term_and_nothing_above_it() {
+        let with_r2: Profile<f64> = Profile::EvenAsphere {
             curvature: 0.02,
             conic: -3.0,
-            coeffs: vec![1e-3, 1e-5],
+            coeffs: vec![1e-3, 1e-5, 1e-9],
         };
-        assert_eq!(p.paraxial_curvature(), 0.02);
+        assert_eq!(with_r2.paraxial_curvature(), 0.02 + 2.0 * 1e-3);
+
+        // Everything from r^4 up is fourth order and invisible to first-order optics.
+        let higher_only: Profile<f64> = Profile::EvenAsphere {
+            curvature: 0.02,
+            conic: -3.0,
+            coeffs: vec![0.0, 1e-5, 1e-9],
+        };
+        assert_eq!(higher_only.paraxial_curvature(), 0.02);
+
+        let empty: Profile<f64> = Profile::EvenAsphere {
+            curvature: 0.02,
+            conic: 0.0,
+            coeffs: vec![],
+        };
+        assert_eq!(empty.paraxial_curvature(), 0.02);
         assert_eq!(Profile::<f64>::Plane.paraxial_curvature(), 0.0);
     }
 }

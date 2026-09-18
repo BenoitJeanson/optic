@@ -117,6 +117,29 @@ fn air_index(wavelength: f64) -> f64 {
     1.0 + (6432.8 + 2_949_810.0 / (146.0 - s2) + 25_540.0 / (41.0 - s2)) * 1e-8
 }
 
+/// Interpret a six-digit glass code as a model glass.
+///
+/// The code packs the two numbers that matter: `nnnvvv` where `nnn` is
+/// `(n_d - 1) * 1000` and `vvv` is `V_d * 10`, so `613585` is n_d 1.613, V_d 58.5.
+/// Optical literature quotes designs this way when the original glass is obsolete or
+/// the author wants the design to be reproducible in any catalogue, and Zemax accepts
+/// the same notation. Separators are ignored, so `613:585` and `613585` both work.
+///
+/// Returns `None` if the text is not six digits or the numbers are unphysical.
+pub fn glass_code(text: &str) -> Option<Material> {
+    let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() != 6 || digits.len() != text.chars().filter(|c| !"-_.: /".contains(*c)).count()
+    {
+        return None;
+    }
+    let nd = 1.0 + digits[..3].parse::<f64>().ok()? / 1000.0;
+    let vd = digits[3..].parse::<f64>().ok()? / 10.0;
+    if !(1.1..2.5).contains(&nd) || !(5.0..120.0).contains(&vd) {
+        return None;
+    }
+    Some(Material::ModelGlass { nd, vd })
+}
+
 /// A small built-in catalog.
 ///
 /// These are Schott N-series coefficients. The test suite checks each entry reproduces

@@ -464,15 +464,29 @@ mod tests {
     }
 
     #[test]
-    fn an_aspheric_vertex_does_not_disturb_first_order_optics() {
-        // Aspheric terms start at r^4, so adding them must leave the paraxial trace alone.
+    fn aspheric_terms_above_r2_do_not_disturb_first_order_optics() {
         let mut sys = thin_lens(100.0, -100.0, 1.5);
         let before = Paraxial::compute(&sys, lines::D).efl;
+
+        // alpha-1 is zero here, so only r^4 and r^6 are present: fourth order and above,
+        // invisible to the paraxial trace.
         sys.surfaces[0].profile = Profile::EvenAsphere {
             curvature: 1.0 / 100.0,
             conic: -2.5,
-            coeffs: vec![1e-6, -3e-9],
+            coeffs: vec![0.0, 1e-6, -3e-9],
         };
         assert!((Paraxial::compute(&sys, lines::D).efl - before).abs() < 1e-12);
+
+        // An r^2 term, by contrast, must move the focal length.
+        sys.surfaces[0].profile = Profile::EvenAsphere {
+            curvature: 1.0 / 100.0,
+            conic: -2.5,
+            coeffs: vec![1e-4],
+        };
+        let after = Paraxial::compute(&sys, lines::D).efl;
+        assert!(
+            (after - before).abs() > 0.1,
+            "an r^2 coefficient left the focal length at {before}"
+        );
     }
 }

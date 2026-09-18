@@ -286,7 +286,13 @@ pub fn material_for(name: &str) -> Result<Material, String> {
     if key.eq_ignore_ascii_case("mirror") {
         return Ok(Material::Mirror);
     }
-    catalog::by_name(key).ok_or_else(|| format!("unknown glass \"{key}\""))
+    if let Some(m) = catalog::by_name(key) {
+        return Ok(m);
+    }
+    // Literature quotes designs by six-digit code when the original glass is obsolete.
+    optic_core::glass_code(key).ok_or_else(|| {
+        format!("unknown glass \"{key}\" (try a catalogue name or a code like 613585)")
+    })
 }
 
 /// Every glass the demo offers, including the two pseudo-media.
@@ -724,6 +730,45 @@ pub fn analyze(request: &Request) -> Result<Analysis, String> {
     })
 }
 
+/// Read a `.zmx` file's raw bytes into a prescription the editor can hold.
+///
+/// Takes bytes rather than a string because the encoding is part of the problem: Zemax
+/// has written both UTF-16LE and UTF-8, and decoding is the reader's job.
+pub fn import_zmx_json(bytes: &[u8]) -> String {
+    let text = optic_io::zmx::decode(bytes);
+    match optic_io::zmx::parse(&text) {
+        Ok(imported) => {
+            let mut spec = spec_of(&imported.system);
+            if let Some(p) = optic_io::zmx::primary_index(&text) {
+                if p < spec.wavelengths.len() {
+                    spec.primary_wavelength = Some(p);
+                }
+            }
+            serde_json::json!({
+                "ok": true,
+                "system": spec,
+                "warnings": imported.warnings,
+            })
+            .to_string()
+        }
+        Err(e) => error_json(&e),
+    }
+}
+
+/// Write a prescription out as `.zmx`, so it can be checked in Zemax.
+pub fn export_zmx_json(request: &str) -> String {
+    let parsed: Result<SystemSpec, _> = serde_json::from_str(request);
+    match parsed
+        .map_err(|e| e.to_string())
+        .and_then(|spec| spec.build())
+    {
+        Ok(sys) => {
+            serde_json::json!({ "ok": true, "text": optic_io::zmx::write(&sys) }).to_string()
+        }
+        Err(e) => error_json(&e),
+    }
+}
+
 /// Parse, analyse and serialise. Errors come back as `{"ok": false, "error": ...}`.
 pub fn analyze_json(request: &str) -> String {
     let parsed: Result<Request, _> = serde_json::from_str(request);
@@ -745,7 +790,12 @@ fn error_json(message: &str) -> String {
 pub fn presets_json() -> String {
     serde_json::json!({
         "glasses": glass_names(),
-        "presets": [spec_of(&samples::cooke_triplet::<f64>()), spec_of(&samples::singlet::<f64>())],
+        "presets": [
+            spec_of(&samples::cooke_triplet::<f64>()),
+            spec_of(&samples::singlet::<f64>()),
+            spec_of(&samples::smith_triplet_moderate::<f64>()),
+            spec_of(&samples::smith_triplet_wide::<f64>()),
+        ],
     })
     .to_string()
 }
@@ -1138,6 +1188,75 @@ mod tests {
         assert!(a.ok);
         assert!((a.first_order.efl - 97.5804).abs() < 1e-3);
         assert_eq!(a.layout.elements.len(), 1);
+    }
+
+    #[test]
+    fn a_prescription_survives_export_and_reimport_through_the_api() {
+        let original = cooke();
+        let exported: serde_json::Value =
+            serde_json::from_str(&export_zmx_json(&serde_json::to_string(&original).unwrap()))
+                .unwrap();
+        assert_eq!(exported["ok"], true);
+        let text = exported["text"].as_str().expect("zmx text");
+
+        let imported: serde_json::Value =
+            serde_json::from_str(&import_zmx_json(text.as_bytes())).unwrap();
+        assert_eq!(imported["ok"], true, "{imported}");
+        let spec: SystemSpec = serde_json::from_value(imported["system"].clone()).unwrap();
+
+        assert_eq!(spec.surfaces.len(), original.surfaces.len());
+        assert_eq!(spec.wavelengths.len(), original.wavelengths.len());
+        for (a, b) in spec.surfaces.iter().zip(original.surfaces.iter()) {
+            assert_eq!(a.glass, b.glass);
+            assert!((a.thickness - b.thickness).abs() < 1e-9);
+        }
+
+        // And the round-tripped system analyses to the same first-order data.
+        let before = run(original).first_order.efl;
+        let after = run(spec).first_order.efl;
+        assert!((before - after).abs() < 1e-6, "{before} vs {after}");
+    }
+
+    #[test]
+    fn importing_a_utf16_file_works_through_the_api() {
+        let text = export_zmx_json(&serde_json::to_string(&cooke()).unwrap());
+        let inner: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let zmx = inner["text"].as_str().unwrap();
+
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in zmx.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        let imported: serde_json::Value = serde_json::from_str(&import_zmx_json(&bytes)).unwrap();
+        assert_eq!(imported["ok"], true, "{imported}");
+    }
+
+    #[test]
+    fn importing_something_that_is_not_a_prescription_fails_politely() {
+        for junk in [&b""[..], b"hello", b"\x00\x01\x02\x03"] {
+            let out: serde_json::Value = serde_json::from_str(&import_zmx_json(junk)).unwrap();
+            assert_eq!(out["ok"], false, "{out}");
+            assert!(out["error"].is_string());
+        }
+    }
+
+    #[test]
+    fn import_reports_what_it_could_not_honour() {
+        let zmx = "VERS 1\nMODE SEQ\nNAME t\nENPD 10\nFTYP 0 0 1 1 0 0 0 1\nXFLN 0\nYFLN 0\n\
+                   WAVM 1 0.5876 1\nVDYN 0.3\nSURF 0\n  TYPE STANDARD\n  CURV 0\n  DISZ INFINITY\n\
+                   SURF 1\n  TYPE STANDARD\n  CURV 0.01\n  DISZ 5\n  GLAS N-BK7 0 0 1.5168 64.17\n  STOP\n\
+                   SURF 2\n  TYPE STANDARD\n  CURV -0.01\n  DISZ 95\n\
+                   SURF 3\n  TYPE STANDARD\n  CURV 0\n  DISZ 0\n";
+        let out: serde_json::Value =
+            serde_json::from_str(&import_zmx_json(zmx.as_bytes())).unwrap();
+        assert_eq!(out["ok"], true, "{out}");
+        let warnings = out["warnings"].as_array().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("vignetting")),
+            "{warnings:?}"
+        );
     }
 
     #[test]

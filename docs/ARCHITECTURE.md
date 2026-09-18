@@ -49,6 +49,34 @@ MTF, Seidel diagram and coefficients, ray fan, footprint, field curvature and di
 grid distortion, longitudinal aberration, lateral colour, chromatic focal shift, wavefront
 map, interferogram, PSF.
 
+### First external validation
+
+Two Cooke triplets from expired patents — English Patent 155,640 (1919) and German Patent
+287,089 (1913), tabulated in W. Smith, *Modern Optical Engineering*, figures 12.13 and
+12.14 — are now reference designs in the test suite. Both are published at focal length
+100 units with plots of spherical aberration, field curvature and distortion.
+
+| | our focal length | published | rounding budget (RMS) |
+|---|---|---|---|
+| EP 155,640 | 99.637 | 100 | ±0.276 |
+| DE 287,089 | 99.089 | 100 | ±1.534 |
+
+Both agree to within the precision of the printed data. That claim is not a judgement
+call: the focal length is differentiated with respect to all six radii and five
+thicknesses at once, and the ±0.05 implied by one-decimal rounding is propagated through.
+The wide-field design's shorter radii make it eleven times more sensitive — its first
+radius moves the focal length by 20.8 units per unit of radius, against 3.6 for the other
+— which is exactly why it agrees less well. A discrepancy that tracks sensitivity is
+rounding; one that does not would be a bug.
+
+Distortion agrees too: +0.030% at 20° and +0.712% at 30°, against plots drawn on a ±1%
+scale showing very little and roughly one percent respectively.
+
+Note that this is *Modern Optical Engineering*, not the *Modern Lens Design* Elias named.
+Same author, different book: the former is a textbook with a handful of worked designs,
+the latter a catalogue of about a hundred with performance data. The catalogue remains
+the better source.
+
 ### The open discrepancy
 
 Elias analysed a 50 mm f/5 triplet and got RMS spot radii of 13.819 µm on axis and
@@ -198,9 +226,9 @@ from refractiveindex.info, which is CC0.
 - **M1** — optimisation: variables, merit operands (the Zemax set), Levenberg–Marquardt
   with analytic Jacobians. Vignetting factors. The analysis list above, starting with
   Seidel, MTF, ray fans and field curvature. Aspheric r² term and Forbes Q-type.
-- **M2** — the desktop application, with live-updating analysis windows. `.zmx` import,
-  pulled forward: it is the only format he has, and it is how we settle whether this
-  kernel agrees with Zemax on a prescription we both hold.
+- **M2** — the desktop application, with live-updating analysis windows. `.zmx` import
+  and export are **done** and available in the browser demo, so any Zemax file can be
+  opened here and any design here checked in Zemax.
 - **M3** — tolerancing (sensitivity and Monte Carlo), coatings, polarisation. Thermal
   moves earlier if temperature work blocks him.
 - **M4** — non-sequential mode: sources, detectors, scattering, stray light.

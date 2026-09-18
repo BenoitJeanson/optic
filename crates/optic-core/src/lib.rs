@@ -32,7 +32,7 @@ pub mod surface;
 pub mod system;
 pub mod trace;
 
-pub use material::{catalog, lines, Material};
+pub use material::{catalog, glass_code, lines, Material};
 pub use math::{Dual, Scalar, Transform, Vec3};
 pub use paraxial::{Paraxial, ParaxialState};
 pub use solve::{resolve, SolveReport, ThicknessSolve};

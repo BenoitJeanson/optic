@@ -27,6 +27,8 @@ const state = {
   pupilPattern: "square",
   showAiry: true,
   pending: false,
+  /** Warnings from the last .zmx import, shown alongside the analysis ones. */
+  importWarnings: [],
 };
 
 const SOLVE_LABELS = {
@@ -115,6 +117,33 @@ async function boot() {
     update({ refocus: !solved });
   });
 
+  el("zmx-file").addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (file) await openZmx(file);
+    e.target.value = "";
+  });
+
+  el("zmx-export").addEventListener("click", saveZmx);
+
+  // Dropping a file anywhere on the page is the obvious gesture, so support it.
+  for (const type of ["dragenter", "dragover"]) {
+    window.addEventListener(type, (e) => {
+      e.preventDefault();
+      document.body.classList.add("dragging");
+    });
+  }
+  for (const type of ["dragleave", "drop"]) {
+    window.addEventListener(type, (e) => {
+      e.preventDefault();
+      if (type === "dragleave" && e.relatedTarget) return;
+      document.body.classList.remove("dragging");
+    });
+  }
+  window.addEventListener("drop", async (e) => {
+    const file = e.dataTransfer?.files?.[0];
+    if (file) await openZmx(file);
+  });
+
   // Bound once: renderTable replaces the rows, not the table body, so attaching there
   // would stack a new listener on every redraw.
   el("prescription").addEventListener("input", onCellEdit);
@@ -123,6 +152,67 @@ async function boot() {
   window.addEventListener("resize", () => render());
 
   loadPreset(0);
+}
+
+/**
+ * Load a Zemax prescription.
+ *
+ * Whatever the importer could not honour is kept and shown with the analysis warnings:
+ * a design that silently loses a coordinate break or a vignetting factor is worse than
+ * one that arrives with a list of caveats.
+ */
+async function openZmx(file) {
+  let result;
+  try {
+    result = state.engine.importZmx(await file.arrayBuffer());
+  } catch (error) {
+    showError(`Could not read ${file.name}: ${error.message}`);
+    return;
+  }
+  if (!result.ok) {
+    showError(`${file.name}: ${result.error}`);
+    return;
+  }
+
+  state.spec = result.system;
+  state.importWarnings = result.warnings ?? [];
+  state.defocus = 0;
+  state.fieldAxis = state.spec.fields.some((f) => Math.abs(f.x) > Math.abs(f.y)) ? "x" : "y";
+
+  el("preset").selectedIndex = -1;
+  el("epd").value = state.spec.entrance_pupil_diameter;
+  el("fields").value = fieldMagnitudes().join(", ");
+  el("field-axis").value = state.fieldAxis;
+  el("wavelengths").value = state.spec.wavelengths.map((w) => w.toFixed(4)).join(", ");
+  el("defocus").value = 0;
+  el("defocus-value").textContent = "+0.00 mm";
+
+  renderPrimaryChoices();
+  renderTable();
+  update();
+}
+
+/** Hand the current prescription back as a .zmx file. */
+function saveZmx() {
+  const result = state.engine.exportZmx(state.spec);
+  if (!result.ok) {
+    showError(result.error);
+    return;
+  }
+  const name = (state.spec.title || "optic").replace(/[^\w.-]+/g, "_");
+  const url = URL.createObjectURL(new Blob([result.text], { type: "text/plain" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${name}.zmx`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function showError(message) {
+  el("error").textContent = message;
+  el("error").hidden = false;
 }
 
 function lastSurface() {
@@ -142,6 +232,7 @@ function setFields(values) {
 
 function loadPreset(index) {
   state.spec = structuredClone(state.presets[index]);
+  state.importWarnings = [];
   state.defocus = 0;
   state.fieldAxis = state.spec.fields.some((f) => Math.abs(f.x) > Math.abs(f.y)) ? "x" : "y";
 
@@ -309,7 +400,7 @@ function renderDistortion() {
 }
 
 function renderWarnings() {
-  const list = state.analysis.warnings;
+  const list = [...state.importWarnings, ...state.analysis.warnings];
   el("warnings").hidden = list.length === 0;
   el("warnings").innerHTML = list.map((w) => `<li>${escapeHtml(w)}</li>`).join("");
 }

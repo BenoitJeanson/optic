@@ -19,7 +19,10 @@
 
 pub mod api;
 
-pub use api::{analyze, analyze_json, presets_json, Analysis, Request, SystemSpec};
+pub use api::{
+    analyze, analyze_json, export_zmx_json, import_zmx_json, presets_json, Analysis, Request,
+    SystemSpec,
+};
 
 /// Hand a buffer's memory to the caller, who becomes responsible for returning it.
 fn leak(bytes: Vec<u8>) -> *mut u8 {
@@ -100,6 +103,37 @@ pub unsafe extern "C" fn optic_analyze(ptr: *const u8, len: usize) -> *mut u8 {
 #[no_mangle]
 pub extern "C" fn optic_presets() -> *mut u8 {
     leak_prefixed(presets_json())
+}
+
+/// Read `len` raw bytes of a `.zmx` file at `ptr` into a prescription.
+///
+/// Raw bytes, not a string: the file may be UTF-16LE, and deciding that is the reader's
+/// job rather than the caller's.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn optic_import_zmx(ptr: *const u8, len: usize) -> *mut u8 {
+    let bytes: &[u8] = if ptr.is_null() {
+        &[]
+    } else {
+        core::slice::from_raw_parts(ptr, len)
+    };
+    leak_prefixed(import_zmx_json(bytes))
+}
+
+/// Write the prescription described by `len` bytes of UTF-8 JSON at `ptr` as `.zmx`.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn optic_export_zmx(ptr: *const u8, len: usize) -> *mut u8 {
+    let request = if ptr.is_null() {
+        String::new()
+    } else {
+        String::from_utf8_lossy(core::slice::from_raw_parts(ptr, len)).into_owned()
+    };
+    leak_prefixed(export_zmx_json(&request))
 }
 
 #[cfg(test)]

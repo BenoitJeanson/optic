@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/optic-core", "crates/optic-wasm"]
+members = ["crates/optic-core", "crates/optic-io", "crates/optic-wasm"]
 
 [workspace.package]
 version = "0.0.1"
@@ -15,6 +15,7 @@ authors = ["Benoit Jeanson", "Elias"]
 
 [workspace.dependencies]
 optic-core = { path = "crates/optic-core", version = "0.0.1" }
+optic-io = { path = "crates/optic-io", version = "0.0.1" }
 serde = { version = "1", features = ["derive"] }
 approx = "0.5"
 

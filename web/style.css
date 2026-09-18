@@ -435,3 +435,54 @@ table.distortion {
   border-style: dashed;
   cursor: not-allowed;
 }
+
+/* Interchange sits with the prescription, because that is what it replaces: opening a
+   file is an alternative to typing the table. */
+.interop {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.interop label.file {
+  flex-direction: row;
+  align-items: center;
+  margin: 0;
+}
+
+.interop input[type="file"] {
+  display: none;
+}
+
+.interop label.file span,
+.interop button {
+  display: inline-block;
+  font: inherit;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.interop label.file:hover span {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.interop-note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+body.dragging {
+  outline: 3px dashed var(--accent);
+  outline-offset: -8px;
+}

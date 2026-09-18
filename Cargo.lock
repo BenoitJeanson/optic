@@ -47,10 +47,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "optic-io"
+version = "0.0.1"
+dependencies = [
+ "approx",
+ "optic-core",
+]
+
+[[package]]
 name = "optic-wasm"
 version = "0.0.1"
 dependencies = [
  "optic-core",
+ "optic-io",
  "serde",
  "serde_json",
 ]
