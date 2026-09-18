@@ -853,6 +853,13 @@ fn curvature_to_radius(c: f64) -> Option<f64> {
     }
 }
 
+/// Name a medium so that [`material_for`] reads back the same medium.
+///
+/// A catalogue name is preferred because it carries the full dispersion. Failing that,
+/// a six-digit code preserves n_d and V_d, which is what a design quoted from the
+/// literature has anyway. Falling back to "AIR" would silently strip a lens of its
+/// glass and leave a prescription with no focal length, so anything unnameable is
+/// reported as such and refused on the way back in.
 fn glass_name_of(m: &Material) -> String {
     match m {
         Material::Vacuum | Material::Air => "AIR".into(),
@@ -861,7 +868,8 @@ fn glass_name_of(m: &Material) -> String {
             .iter()
             .find(|(_, g, ..)| *g == other)
             .map(|(n, ..)| n.to_string())
-            .unwrap_or_else(|| "AIR".into()),
+            .or_else(|| other.code())
+            .unwrap_or_else(|| "UNNAMEABLE".into()),
     }
 }
 
@@ -875,6 +883,48 @@ mod tests {
 
     fn cooke() -> SystemSpec {
         serde_json::from_value(presets()["presets"][0].clone()).unwrap()
+    }
+
+    #[test]
+    fn every_preset_survives_the_journey_to_the_browser() {
+        // A preset reaches the demo as JSON, so a medium the projection cannot name is a
+        // medium the browser never receives. Naming an unknown glass "AIR" once turned
+        // both published triplets into stacks of air: they loaded with no focal length
+        // at all, while the Rust samples they were built from were perfectly correct.
+        // Checking the samples is therefore not enough; the projection needs its own test.
+        let sources = [
+            samples::cooke_triplet::<f64>(),
+            samples::singlet::<f64>(),
+            samples::smith_triplet_moderate::<f64>(),
+            samples::smith_triplet_wide::<f64>(),
+        ];
+        let presets = presets();
+        let presets = presets["presets"].as_array().unwrap();
+        assert_eq!(presets.len(), sources.len(), "a preset was added untested");
+
+        for (preset, source) in presets.iter().zip(&sources) {
+            let spec: SystemSpec = serde_json::from_value(preset.clone()).unwrap();
+            let title = spec.title.clone();
+
+            for s in &spec.surfaces {
+                assert!(
+                    material_for(&s.glass).is_ok(),
+                    "{title}: glass {:?} cannot be read back",
+                    s.glass
+                );
+            }
+
+            // Against the sample itself, not against the projection's own output, so a
+            // glass that degrades into a nearby one is caught as well as one that
+            // vanishes entirely.
+            let primary = source.wavelengths[source.wavelengths.len() / 2].um;
+            let want = Paraxial::compute(source, primary).efl;
+            let got = run(spec).first_order.efl;
+            assert!(
+                (got - want).abs() < 1e-9,
+                "{title}: focal length {got} through JSON, {want} in the sample"
+            );
+        }
     }
 
     fn run(spec: SystemSpec) -> Analysis {

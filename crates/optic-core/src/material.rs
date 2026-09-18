@@ -104,6 +104,29 @@ impl Material {
     pub fn is_reflective(&self) -> bool {
         matches!(self, Material::Mirror)
     }
+
+    /// This medium as a six-digit glass code, the inverse of [`glass_code`].
+    ///
+    /// Any dispersive medium has a code, because the code carries only `n_d` and `V_d`.
+    /// For a [`Material::ModelGlass`] that came from a code the round trip is exact; for
+    /// a catalogue glass the code is a lossy summary, so prefer the catalogue name when
+    /// one exists. Returns `None` when no code can describe the medium: a
+    /// non-dispersive one has an infinite Abbe number, and vacuum, air and mirrors are
+    /// not glasses at all.
+    pub fn code(&self) -> Option<String> {
+        if matches!(self, Material::Vacuum | Material::Air | Material::Mirror) {
+            return None;
+        }
+        let n = ((self.nd() - 1.0) * 1000.0).round();
+        let v = (self.abbe() * 10.0).round();
+        // Each field must stay three digits, or the result is not a six-digit code and
+        // glass_code would refuse to read it back. That caps n_d below 2.0 and V_d below
+        // 100, which is the same limit the notation itself has.
+        if !(100.0..=999.0).contains(&n) || !(50.0..=999.0).contains(&v) {
+            return None;
+        }
+        Some(format!("{n:03}{v:03}"))
+    }
 }
 
 /// Refractive index of standard air, Kohlrausch's form of the Edlen equation.
@@ -213,6 +236,35 @@ pub mod catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_glass_code_survives_a_round_trip() {
+        // Codes quoted in the literature, including the four the published triplets use.
+        for code in ["613585", "621362", "611591", "549458", "517642"] {
+            let m = glass_code(code).expect("a valid code");
+            assert_eq!(m.code().as_deref(), Some(code));
+        }
+    }
+
+    #[test]
+    fn a_catalog_glass_reports_the_code_its_numbers_imply() {
+        // Lossy but faithful: the code is n_d and V_d, which is all a code ever carries.
+        let bk7 = catalog::N_BK7;
+        let code = bk7.code().expect("a dispersive glass has a code");
+        let model = glass_code(&code).expect("and that code is readable");
+        assert!((model.nd() - bk7.nd()).abs() < 5e-4);
+        assert!((model.abbe() - bk7.abbe()).abs() < 5e-2);
+    }
+
+    #[test]
+    fn media_that_no_code_can_describe_report_none() {
+        // A code cannot say "no dispersion": V_d would be infinite. Nor is a mirror or
+        // a vacuum a glass. Better to admit this than to emit a code that lies.
+        assert_eq!(Material::Fixed { n: 1.5 }.code(), None);
+        assert_eq!(Material::Vacuum.code(), None);
+        assert_eq!(Material::Air.code(), None);
+        assert_eq!(Material::Mirror.code(), None);
+    }
 
     #[test]
     fn trivial_media_have_unit_index() {
