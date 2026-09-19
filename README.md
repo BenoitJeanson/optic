@@ -9,9 +9,9 @@ and lens optimisation, with a desktop application that a Zemax user can sit down
 of without retraining.
 
 **Status: early. Milestone 0 in progress.** The kernel traces real and paraxial rays
-through centred systems and differentiates them exactly. There is no optimiser and no
-desktop application yet. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for where this
-is going and why.
+through centred systems, differentiates them exactly, and optimises them by damped least
+squares. There is no desktop application yet. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for where this is going and why.
 
 ## Try it in your browser
 
@@ -32,6 +32,10 @@ layout, spot diagrams and first-order data update as you type.
   fixed point before tracing, with derivatives flowing through them
 - **Zemax `.zmx` import and export**, including UTF-16 files, six-digit glass codes, and
   an explicit list of anything the file used that we do not yet model
+- **Damped least-squares optimisation** (Levenberg--Marquardt) over curvatures,
+  thicknesses and conics, driven by an exact analytic Jacobian assembled in blocks of
+  eight variables per trace — derivatives flow through thickness solves, so a spot's
+  sensitivity to a curvature includes the refocus the solve performs in response
 - Zemax-style **vignetting factors** per field — two decentres, two compressions and a
   rotation of the pupil — honoured when rays are launched, carried through `.zmx` in
   both directions, and deliberately ignored by distortion, which stays a property of
@@ -53,7 +57,7 @@ python3 -m http.server -d web 8080     # then open http://localhost:8080
 
 ## Verification
 
-165 tests, in three layers, plus 39 headless checks of the browser demo. **Unit tests** live beside the code they cover, one module at a
+186 tests, in three layers, plus 52 headless checks of the browser demo. **Unit tests** live beside the code they cover, one module at a
 time, and can reach private functions: dual-number calculus, vector and transform algebra,
 dispersion formulae, sag and intersection geometry, the paraxial marching step, and the
 tracer's refraction, reflection, clipping and path-length bookkeeping. **Integration
@@ -71,6 +75,9 @@ kernel's own past output:
 | Lagrange invariant across the system | conserved to 1e-10 relative |
 | Real vs. paraxial rays as aperture and field shrink | converges at exactly third order |
 | Autodiff gradients vs. central differences | agree to 1e-5 relative |
+| Optimiser Jacobian vs. central differences | 11 mixed variables, to 1e-5 relative |
+| Optimising a spherical mirror's conic constant | reaches the parabola, -1, to 1e-6 |
+| Optimising one curvature to a focal length target | hits it to 1e-9 |
 | Autofocus solve vs. the computed back focal distance | agree to 1e-10 |
 | **EP 155,640 (1919) triplet** vs. its published focal length | within the source's rounding |
 | **DE 287,089 (1913) triplet** vs. its published focal length | within the source's rounding |
@@ -105,7 +112,8 @@ formatting, clippy, a minimum-supported-Rust-version check, and a WebAssembly bu
 ## Layout
 
 ```
-crates/optic-core    the kernel: geometry, materials, tracing, paraxial optics, solves
+crates/optic-core    the kernel: geometry, materials, tracing, paraxial optics, solves,
+                     and the damped least-squares optimiser
 crates/optic-io      reading and writing prescriptions: Zemax .zmx in and out
 crates/optic-wasm    a JSON analysis API over it, and the C ABI the browser calls
 web/                 the demo page -- plain ES modules, no build step

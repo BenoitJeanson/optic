@@ -57,7 +57,8 @@ impl<S: Scalar> Profile<S> {
         }
     }
 
-    fn curvature(&self) -> S {
+    /// Vertex curvature: the reciprocal of the radius, and zero for a plane.
+    pub fn curvature(&self) -> S {
         match self {
             Profile::Plane => S::zero(),
             Profile::Conic { curvature, .. } | Profile::EvenAsphere { curvature, .. } => *curvature,

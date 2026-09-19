@@ -25,6 +25,7 @@
 
 pub mod material;
 pub mod math;
+pub mod optimize;
 pub mod paraxial;
 pub mod samples;
 pub mod solve;
@@ -34,6 +35,7 @@ pub mod trace;
 
 pub use material::{catalog, glass_code, lines, Material};
 pub use math::{Dual, Scalar, Transform, Vec3};
+pub use optimize::{jacobian, optimise, Merit, Operand, Report, Settings, Stop, Variable};
 pub use paraxial::{Paraxial, ParaxialState};
 pub use solve::{resolve, SolveReport, ThicknessSolve};
 pub use surface::{MissReason, Profile};

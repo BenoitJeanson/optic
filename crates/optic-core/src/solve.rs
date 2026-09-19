@@ -45,6 +45,33 @@ impl<S: Scalar> Default for ThicknessSolve<S> {
 }
 
 impl<S: Scalar> ThicknessSolve<S> {
+    /// The same solve expressed in another scalar type.
+    ///
+    /// A solve carries numbers a designer typed, never derived quantities, so lifting it
+    /// into a dual type makes them constants. The thickness the solve *produces* still
+    /// carries derivatives: those come from the trace that resolves it, which is the
+    /// whole reason a solved design can be optimised at all.
+    pub fn lift<T: Scalar>(&self) -> ThicknessSolve<T> {
+        match *self {
+            ThicknessSolve::Fixed => ThicknessSolve::Fixed,
+            ThicknessSolve::MarginalRayHeight { height } => ThicknessSolve::MarginalRayHeight {
+                height: T::from_f64(height.value()),
+            },
+            ThicknessSolve::ChiefRayHeight { height } => ThicknessSolve::ChiefRayHeight {
+                height: T::from_f64(height.value()),
+            },
+            ThicknessSolve::Pickup {
+                from,
+                scale,
+                offset,
+            } => ThicknessSolve::Pickup {
+                from,
+                scale: T::from_f64(scale.value()),
+                offset: T::from_f64(offset.value()),
+            },
+        }
+    }
+
     pub fn is_fixed(&self) -> bool {
         matches!(self, ThicknessSolve::Fixed)
     }
