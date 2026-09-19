@@ -237,9 +237,28 @@ pub fn chief_ray<S: Scalar>(
 }
 
 impl<S: Scalar> Paraxial<S> {
-    /// Paraxial image height for one field point.
+    /// Paraxial image height for one field point, in the meridional plane containing it.
+    ///
+    /// This is a distance from the axis along the field's own direction, so it says how
+    /// far the image point lies from the axis but not which way. Use
+    /// [`image_point`](Self::image_point) when the direction matters, which it does for
+    /// anything that has to tell +20 degrees from -20 degrees: image orientation, grid
+    /// distortion, the direction of lateral colour.
     pub fn image_height(&self, sys: &System<S>, wl: f64, field: crate::system::Field) -> S {
         chief_ray(sys, wl, field, self.ep_z)[sys.image_index()].y
+    }
+
+    /// Paraxial image point for one field, as `[x, y]` in the image plane.
+    ///
+    /// The paraxial trace runs in the meridional plane containing the field point, which
+    /// a rotationally symmetric system lets us rotate freely; the field's direction
+    /// rotates the result back. The convention is the real tracer's — a ray from field
+    /// `(x, y)` travels along `(tan x, tan y, 1)` — so this and a real chief ray agree on
+    /// which side of the axis the image lies, and agree numerically as the field shrinks.
+    pub fn image_point(&self, sys: &System<S>, wl: f64, field: crate::system::Field) -> [S; 2] {
+        let h = self.image_height(sys, wl, field);
+        let (dx, dy) = field.direction();
+        [h * S::from_f64(dx), h * S::from_f64(dy)]
     }
 }
 
@@ -440,6 +459,64 @@ mod tests {
             assert_eq!(s.u, 0.0);
         }
         assert_eq!(par.image_height(&sys, lines::D, Field::angle(0.0)), 0.0);
+    }
+
+    #[test]
+    fn the_image_point_carries_the_direction_the_height_cannot() {
+        let sys = crate::samples::cooke_triplet::<f64>();
+        let par = Paraxial::compute(&sys, lines::D);
+
+        let up = Field::angle(20.0);
+        let down = Field::angle(-20.0);
+        let across = Field::Angle { x: 20.0, y: 0.0 };
+
+        // The height alone cannot tell these three fields apart: a rotationally symmetric
+        // system images all of them the same distance from the axis.
+        let h = par.image_height(&sys, lines::D, up);
+        assert_eq!(h, par.image_height(&sys, lines::D, down));
+        assert_eq!(h, par.image_height(&sys, lines::D, across));
+
+        // The point can.
+        let up = par.image_point(&sys, lines::D, up);
+        assert!(up[1].abs() > 1.0 && up[0] == 0.0);
+        assert_eq!(par.image_point(&sys, lines::D, down), [-up[0], -up[1]]);
+        let across = par.image_point(&sys, lines::D, across);
+        assert!((across[0] - up[1]).abs() < 1e-12 && across[1] == 0.0);
+    }
+
+    #[test]
+    fn the_paraxial_image_point_agrees_with_a_real_chief_ray() {
+        // Paraxial optics is the small-field limit of the real trace, and the real trace
+        // is unambiguous 3D geometry: a ray from field (x, y) travels along
+        // (tan x, tan y, 1). So the two must agree in *both* components, which pins the
+        // direction convention to something already proven rather than to a choice.
+        let sys = crate::samples::cooke_triplet::<f64>();
+        let par = Paraxial::compute(&sys, lines::D);
+
+        for field in [
+            Field::angle(0.5),
+            Field::angle(-0.5),
+            Field::Angle { x: 0.5, y: 0.0 },
+            Field::Angle { x: -0.35, y: 0.35 },
+        ] {
+            let want = par.image_point(&sys, lines::D, field);
+            let got = crate::trace::trace(
+                &sys,
+                lines::D,
+                crate::trace::launch(&sys, &par, field, 0.0, 0.0),
+            )
+            .image_point()
+            .expect("the chief ray reaches the image plane");
+
+            assert!(
+                (got.x - want[0]).abs() < 1e-3 && (got.y - want[1]).abs() < 1e-3,
+                "{field:?}: real ({}, {}) against paraxial ({}, {})",
+                got.x,
+                got.y,
+                want[0],
+                want[1]
+            );
+        }
     }
 
     #[test]

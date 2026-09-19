@@ -135,6 +135,26 @@ impl Field {
             Field::Angle { x, y } | Field::Height { x, y } => (x * x + y * y).sqrt(),
         }
     }
+
+    /// Unit vector pointing from the axis toward this field point.
+    ///
+    /// A rotationally symmetric system images every field at the same distance from the
+    /// axis, so [`radius`](Self::radius) is all the paraxial trace needs — but the image
+    /// point also has a *direction*, and that is what tells +20 degrees from -20 degrees,
+    /// and a field in X from the same field in Y. The axial field has no direction and
+    /// reports `(0, 0)`, so anything scaled by it lands on the axis where it belongs.
+    pub fn direction(&self) -> (f64, f64) {
+        match *self {
+            Field::Angle { x, y } | Field::Height { x, y } => {
+                let r = (x * x + y * y).sqrt();
+                if r == 0.0 {
+                    (0.0, 0.0)
+                } else {
+                    (x / r, y / r)
+                }
+            }
+        }
+    }
 }
 
 /// How the system's aperture is specified.
@@ -360,6 +380,18 @@ mod tests {
         assert_eq!(Field::Height { x: -3.0, y: 4.0 }.radius(), 5.0);
         assert_eq!(Field::angle(7.0).radius(), 7.0);
         assert_eq!(Field::height(0.0).radius(), 0.0);
+    }
+
+    #[test]
+    fn field_direction_separates_what_radius_merges() {
+        assert_eq!(Field::Angle { x: 3.0, y: 4.0 }.direction(), (0.6, 0.8));
+        assert_eq!(Field::angle(7.0).direction(), (0.0, 1.0));
+        assert_eq!(Field::angle(-7.0).direction(), (0.0, -1.0));
+        assert_eq!(Field::Angle { x: 7.0, y: 0.0 }.direction(), (1.0, 0.0));
+
+        // The axis has no direction to report, and must not invent one.
+        assert_eq!(Field::angle(0.0).direction(), (0.0, 0.0));
+        assert_eq!(Field::height(0.0).direction(), (0.0, 0.0));
     }
 
     #[test]

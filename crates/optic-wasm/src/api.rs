@@ -593,17 +593,22 @@ pub fn analyze(request: &Request) -> Result<Analysis, String> {
         for (wi, w) in request.system.wavelengths.iter().enumerate() {
             let par_w = Paraxial::compute(&sys, *w);
 
-            // Distortion: the real chief ray against the paraxial prediction.
-            let paraxial_height = par_w.image_height(&sys, *w, *field);
-            if paraxial_height.abs() > 1e-9 {
+            // Distortion: the real chief ray against the paraxial prediction. Both are
+            // measured along the paraxial image point's own direction rather than by
+            // magnitude, so a chief ray that lands on the far side of the axis reads as
+            // the gross distortion it is, and so that this stays right once decentres
+            // and tilts can push the real intercept out of the meridional plane.
+            let want = par_w.image_point(&sys, *w, *field);
+            let reference = (want[0] * want[0] + want[1] * want[1]).sqrt();
+            if reference > 1e-9 {
                 if let Some(p) =
                     trace(&sys, *w, launch(&sys, &par_w, *field, 0.0, 0.0)).image_point()
                 {
-                    let real = (p.x * p.x + p.y * p.y).sqrt() * paraxial_height.signum();
+                    let real = (p.x * want[0] + p.y * want[1]) / reference;
                     distortion.push(DistortionPoint {
                         field_index: fi,
                         wavelength: *w,
-                        percent: 100.0 * (real - paraxial_height) / paraxial_height,
+                        percent: 100.0 * (real - reference) / reference,
                     });
                 }
             }
