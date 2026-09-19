@@ -161,6 +161,10 @@ fn trace_one<S: Scalar>(
 /// in a system with strong pupil aberration the real pupil is not filled uniformly. Real
 /// ray aiming (iterating on the stop intersection) is a later refinement; the interface
 /// does not change when it arrives.
+///
+/// The field's vignetting factors are applied here, and only here. `(px, py)` therefore
+/// always means "the full pupil" to the caller, and whatever part of it this field
+/// actually uses is settled in one place rather than at every call site.
 pub fn launch<S: Scalar>(
     sys: &System<S>,
     par: &Paraxial<S>,
@@ -168,11 +172,12 @@ pub fn launch<S: Scalar>(
     px: f64,
     py: f64,
 ) -> Ray<S> {
+    let (px, py) = field.vignette().apply(px, py);
     let r = par.epd / S::two();
     let pupil = Vec3::new(S::from_f64(px) * r, S::from_f64(py) * r, par.ep_z);
 
     match (sys.object, field) {
-        (Object::Infinity, Field::Angle { x, y }) => {
+        (Object::Infinity, Field::Angle { x, y, .. }) => {
             let dir = Vec3::new(
                 S::from_f64(x.to_radians().tan()),
                 S::from_f64(y.to_radians().tan()),
@@ -180,7 +185,7 @@ pub fn launch<S: Scalar>(
             );
             Ray::new(pupil, dir)
         }
-        (Object::Finite { distance }, Field::Height { x, y }) => {
+        (Object::Finite { distance }, Field::Height { x, y, .. }) => {
             let src = Vec3::new(S::from_f64(x), S::from_f64(y), -distance);
             Ray::new(src, pupil - src)
         }
@@ -221,6 +226,44 @@ mod tests {
             Vec3::new(0.0, 0.0, -5.0),
             Vec3::new(0.0, theta.sin(), theta.cos()),
         )
+    }
+
+    #[test]
+    fn vignetting_factors_shrink_the_beam_that_is_launched() {
+        use crate::system::Vignette;
+        let sys = crate::samples::cooke_triplet::<f64>();
+        let par = Paraxial::compute(&sys, lines::D);
+        let field = Field::angle(10.0);
+
+        let full = launch(&sys, &par, field, 0.0, 1.0);
+        let squeezed = launch(
+            &sys,
+            &par,
+            field.vignetted(Vignette {
+                cy: 0.5,
+                ..Vignette::NONE
+            }),
+            0.0,
+            1.0,
+        );
+
+        // Same field, so the ray still travels in the same direction; it just enters
+        // through half the pupil height.
+        assert!((squeezed.pos.y - full.pos.y * 0.5).abs() < 1e-12);
+        assert!((squeezed.dir - full.dir).norm() < 1e-15);
+
+        // A decentred pupil moves the ray the caller thinks of as the chief ray.
+        let shifted = launch(
+            &sys,
+            &par,
+            field.vignetted(Vignette {
+                dy: 0.5,
+                ..Vignette::NONE
+            }),
+            0.0,
+            0.0,
+        );
+        assert!((shifted.pos.y - full.pos.y * 0.5).abs() < 1e-12);
     }
 
     #[test]
@@ -373,7 +416,7 @@ mod tests {
         let sys = crate::samples::cooke_triplet::<f64>();
         let par = Paraxial::compute(&sys, lines::D);
 
-        let r = launch(&sys, &par, Field::Angle { x: 0.0, y: 10.0 }, 0.0, 0.0);
+        let r = launch(&sys, &par, Field::angle_xy(0.0, 10.0), 0.0, 0.0);
         let expected = Vec3::new(0.0, 10f64.to_radians().tan(), 1.0).normalized();
         assert!((r.dir - expected).norm() < 1e-15);
         // The pupil centre, at the entrance pupil plane.
@@ -400,7 +443,7 @@ mod tests {
         .with_fields(vec![Field::height(-8.0)]);
 
         let par = Paraxial::compute(&sys, lines::D);
-        let r = launch(&sys, &par, Field::Height { x: 0.0, y: -8.0 }, 0.0, 1.0);
+        let r = launch(&sys, &par, Field::height_xy(0.0, -8.0), 0.0, 1.0);
         assert_eq!(r.pos.value(), [0.0, -8.0, -200.0]);
 
         // It must point at the top of the entrance pupil.

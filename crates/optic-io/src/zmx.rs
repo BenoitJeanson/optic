@@ -19,7 +19,7 @@
 
 use optic_core::material::catalog;
 use optic_core::surface::Profile;
-use optic_core::system::{Aperture, Field, Object, Surface, System, Wavelength};
+use optic_core::system::{Aperture, Field, Object, Surface, System, Vignette, Wavelength};
 use optic_core::Material;
 use std::collections::BTreeMap;
 
@@ -108,7 +108,11 @@ pub fn parse(text: &str) -> Result<Import, String> {
     let mut declared_waves: Option<usize> = None;
     let mut waves: BTreeMap<usize, (f64, f64)> = BTreeMap::new();
     let mut primary_wave: Option<usize> = None;
-    let mut vignetting_used = false;
+    let mut vdxn: Vec<f64> = Vec::new();
+    let mut vdyn: Vec<f64> = Vec::new();
+    let mut vcxn: Vec<f64> = Vec::new();
+    let mut vcyn: Vec<f64> = Vec::new();
+    let mut vann: Vec<f64> = Vec::new();
     let mut unit_warned = false;
 
     for line in text.lines() {
@@ -216,13 +220,12 @@ pub fn parse(text: &str) -> Result<Import, String> {
                 }
             }
             "PWAV" => primary_wave = first_number(rest).map(|v| v as usize),
-            // All-zero vignetting factors mean the feature is unused, which is the
-            // common case; only a non-zero one changes what the prescription means.
-            "VDXN" | "VDYN" | "VCXN" | "VCYN" | "VANN"
-                if numbers(rest).iter().any(|v| *v != 0.0) =>
-            {
-                vignetting_used = true;
-            }
+            // One value per field point, in field order.
+            "VDXN" => vdxn = numbers(rest),
+            "VDYN" => vdyn = numbers(rest),
+            "VCXN" => vcxn = numbers(rest),
+            "VCYN" => vcyn = numbers(rest),
+            "VANN" => vann = numbers(rest),
             _ => {}
         }
     }
@@ -330,10 +333,18 @@ pub fn parse(text: &str) -> Result<Import, String> {
         .map(|i| {
             let x = xfln.get(i).copied().unwrap_or(0.0);
             let y = yfln.get(i).copied().unwrap_or(0.0);
-            match field_type {
-                0 => Field::Angle { x, y },
-                _ => Field::Height { x, y },
-            }
+            let vignette = Vignette {
+                dx: vdxn.get(i).copied().unwrap_or(0.0),
+                dy: vdyn.get(i).copied().unwrap_or(0.0),
+                cx: vcxn.get(i).copied().unwrap_or(0.0),
+                cy: vcyn.get(i).copied().unwrap_or(0.0),
+                angle: vann.get(i).copied().unwrap_or(0.0),
+            };
+            let point = match field_type {
+                0 => Field::angle_xy(x, y),
+                _ => Field::height_xy(x, y),
+            };
+            point.vignetted(vignette)
         })
         .collect();
     if field_type > 1 {
@@ -357,15 +368,6 @@ pub fn parse(text: &str) -> Result<Import, String> {
     if wavelengths.is_empty() {
         wavelengths.push(Wavelength::new(optic_core::lines::D));
         warnings.push("no wavelengths found; assuming the d line".into());
-    }
-
-    if vignetting_used {
-        warnings.push(
-            "this prescription uses vignetting factors, which are not implemented yet; \
-             rays are clipped on the clear apertures instead, so the outer field will \
-             not match Zemax"
-                .into(),
-        );
     }
 
     let mut system = System::new(object, built);
@@ -470,7 +472,7 @@ pub fn write(sys: &System<f64>) -> String {
         .fields
         .iter()
         .map(|f| match *f {
-            Field::Angle { x, y } | Field::Height { x, y } => (x, y),
+            Field::Angle { x, y, .. } | Field::Height { x, y, .. } => (x, y),
         })
         .unzip();
     line(&mut out, &format!("XFLN {}", join(&xs)));
@@ -479,6 +481,19 @@ pub fn write(sys: &System<f64>) -> String {
         &mut out,
         &format!("FWGN {}", join(&vec![1.0; sys.fields.len().max(1)])),
     );
+
+    // Vignetting factors, one value per field. Zemax writes these unconditionally, and
+    // an all-zero set is how a file says the whole pupil is used.
+    let vig: Vec<_> = sys.fields.iter().map(|f| f.vignette()).collect();
+    for (key, values) in [
+        ("VDXN", vig.iter().map(|v| v.dx).collect::<Vec<_>>()),
+        ("VDYN", vig.iter().map(|v| v.dy).collect()),
+        ("VCXN", vig.iter().map(|v| v.cx).collect()),
+        ("VCYN", vig.iter().map(|v| v.cy).collect()),
+        ("VANN", vig.iter().map(|v| v.angle).collect()),
+    ] {
+        line(&mut out, &format!("{key} {}", join(&values)));
+    }
     for (i, w) in sys.wavelengths.iter().enumerate() {
         line(&mut out, &format!("WAVM {} {} {}", i + 1, w.um, w.weight));
     }

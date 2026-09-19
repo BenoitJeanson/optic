@@ -226,13 +226,46 @@ fn unsupported_surface_types_import_with_a_warning() {
 }
 
 #[test]
-fn vignetting_factors_are_reported_because_we_do_not_honour_them() {
+fn vignetting_factors_are_read_onto_the_fields_they_belong_to() {
     let text = SINGLET.replace("PWAV 1", "VDYN 0 0.25\nVCYN 0 0.1\nPWAV 1");
     let imported = zmx::parse(&text).expect("parsed");
+
+    // One value per field, in field order: the axial field keeps the whole pupil and
+    // only the outer one is vignetted.
+    assert!(imported.system.fields[0].vignette().is_full());
+    let v = imported.system.fields[1].vignette();
+    assert_eq!((v.dy, v.cy), (0.25, 0.1));
+    assert_eq!((v.dx, v.cx, v.angle), (0.0, 0.0, 0.0));
+
+    // And nothing is reported as unsupported any more.
     assert!(
-        imported.warnings.iter().any(|w| w.contains("vignetting")),
+        !imported.warnings.iter().any(|w| w.contains("vignetting")),
         "{:?}",
         imported.warnings
+    );
+}
+
+#[test]
+fn vignetting_factors_survive_a_round_trip() {
+    let text = SINGLET.replace(
+        "PWAV 1",
+        "VDXN 0 -0.1\nVDYN 0 0.25\nVCXN 0 0.2\nVCYN 0 0.1\nVANN 0 7.5\nPWAV 1",
+    );
+    let once = zmx::parse(&text).expect("parsed");
+    let twice = zmx::parse(&zmx::write(&once.system)).expect("re-read what we wrote");
+
+    assert_eq!(
+        twice
+            .system
+            .fields
+            .iter()
+            .map(|f| f.vignette())
+            .collect::<Vec<_>>(),
+        once.system
+            .fields
+            .iter()
+            .map(|f| f.vignette())
+            .collect::<Vec<_>>()
     );
 }
 

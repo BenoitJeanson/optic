@@ -217,7 +217,7 @@ pub fn chief_ray<S: Scalar>(
     ep_z: S,
 ) -> Vec<ParaxialState<S>> {
     let (y0, u0) = match (sys.object, field) {
-        (Object::Infinity, crate::system::Field::Angle { x, y }) => {
+        (Object::Infinity, crate::system::Field::Angle { x, y, .. }) => {
             let r = (x * x + y * y).sqrt();
             if r == 0.0 {
                 (S::zero(), S::zero())
@@ -226,7 +226,7 @@ pub fn chief_ray<S: Scalar>(
                 (-u * ep_z, u)
             }
         }
-        (Object::Finite { distance }, crate::system::Field::Height { x, y }) => {
+        (Object::Finite { distance }, crate::system::Field::Height { x, y, .. }) => {
             let h = S::from_f64((x * x + y * y).sqrt());
             let u = -h / (distance + ep_z);
             (h + u * distance, u)
@@ -468,7 +468,7 @@ mod tests {
 
         let up = Field::angle(20.0);
         let down = Field::angle(-20.0);
-        let across = Field::Angle { x: 20.0, y: 0.0 };
+        let across = Field::angle_xy(20.0, 0.0);
 
         // The height alone cannot tell these three fields apart: a rotationally symmetric
         // system images all of them the same distance from the axis.
@@ -496,8 +496,8 @@ mod tests {
         for field in [
             Field::angle(0.5),
             Field::angle(-0.5),
-            Field::Angle { x: 0.5, y: 0.0 },
-            Field::Angle { x: -0.35, y: 0.35 },
+            Field::angle_xy(0.5, 0.0),
+            Field::angle_xy(-0.35, 0.35),
         ] {
             let want = par.image_point(&sys, lines::D, field);
             let got = crate::trace::trace(

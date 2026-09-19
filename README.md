@@ -32,6 +32,10 @@ layout, spot diagrams and first-order data update as you type.
   fixed point before tracing, with derivatives flowing through them
 - **Zemax `.zmx` import and export**, including UTF-16 files, six-digit glass codes, and
   an explicit list of anything the file used that we do not yet model
+- Zemax-style **vignetting factors** per field — two decentres, two compressions and a
+  rotation of the pupil — honoured when rays are launched, carried through `.zmx` in
+  both directions, and deliberately ignored by distortion, which stays a property of
+  the lens rather than of how the pupil was sampled
 - Spot diagrams with three pupil sampling patterns, distortion per field and wavelength,
   scale layout drawings with vignetting shown, and a browser demo
 

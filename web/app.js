@@ -224,10 +224,37 @@ function fieldMagnitudes() {
   return state.spec.fields.map((f) => (Math.abs(f.x) > Math.abs(f.y) ? f.x : f.y));
 }
 
+/**
+ * Rewrite the field list, keeping each field's vignetting factors.
+ *
+ * Retyping the angles must not silently discard the factors an imported .zmx brought
+ * with it: they are part of the prescription, not part of the number being edited.
+ */
 function setFields(values) {
-  state.spec.fields = values.map((v) =>
-    state.fieldAxis === "x" ? { x: v, y: 0 } : { x: 0, y: v },
-  );
+  state.spec.fields = values.map((v, i) => {
+    const kept = state.spec.fields[i] ?? {};
+    return {
+      x: state.fieldAxis === "x" ? v : 0,
+      y: state.fieldAxis === "x" ? 0 : v,
+      vdx: kept.vdx ?? 0,
+      vdy: kept.vdy ?? 0,
+      vcx: kept.vcx ?? 0,
+      vcy: kept.vcy ?? 0,
+      van: kept.van ?? 0,
+    };
+  });
+}
+
+/** The five vignetting factors of one field, or null when it uses the whole pupil. */
+function vignetteOf(field) {
+  const v = {
+    vdx: field.vdx ?? 0,
+    vdy: field.vdy ?? 0,
+    vcx: field.vcx ?? 0,
+    vcy: field.vcy ?? 0,
+    van: field.van ?? 0,
+  };
+  return Object.values(v).some((n) => n !== 0) ? v : null;
 }
 
 function loadPreset(index) {
@@ -295,6 +322,7 @@ function update({ refocus = false } = {}) {
   render();
   renderReadout();
   renderDistortion();
+  renderVignetting();
   renderWarnings();
 }
 
@@ -397,6 +425,41 @@ function renderDistortion() {
     })
     .join("");
   table.innerHTML = `<thead>${head}</thead><tbody>${body}</tbody>`;
+}
+
+/**
+ * Vignetting factors, shown only when a design actually uses them.
+ *
+ * A prescription that carries them traces differently from one that does not, so a
+ * reader comparing these numbers against another tool has to be able to see that they
+ * are in force -- and see them without being told, since they arrive silently with an
+ * imported file.
+ */
+function renderVignetting() {
+  const table = el("vignetting");
+  const used = state.spec.fields.map(vignetteOf);
+  if (!used.some(Boolean)) {
+    table.innerHTML = "";
+    table.hidden = true;
+    return;
+  }
+  table.hidden = false;
+
+  const magnitudes = fieldMagnitudes();
+  const body = state.spec.fields
+    .map((f, i) => {
+      const v = used[i];
+      const cells = v
+        ? [v.vdx, v.vdy, v.vcx, v.vcy, v.van].map((n) => `<td>${n.toFixed(3)}</td>`).join("")
+        : `<td colspan="5">full pupil</td>`;
+      return `<tr><th scope="row">${magnitudes[i]}&deg;</th>${cells}</tr>`;
+    })
+    .join("");
+
+  table.innerHTML =
+    `<caption>Vignetting factors, in force for the rays traced above</caption>` +
+    `<thead><tr><th>Field</th><th>VDX</th><th>VDY</th><th>VCX</th><th>VCY</th><th>VAN</th></tr></thead>` +
+    `<tbody>${body}</tbody>`;
 }
 
 function renderWarnings() {
@@ -514,3 +577,7 @@ function escapeHtml(text) {
  * instead of guessing how long it takes.
  */
 export const ready = boot();
+
+// Exported for the headless smoke test, which needs to put a prescription into the page
+// and read back what the page made of it. Nothing in the page itself reads this.
+export { state };

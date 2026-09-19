@@ -13,7 +13,7 @@ use optic_core::{
     catalog, launch, samples,
     solve::{self, ThicknessSolve},
     surface::Profile,
-    system::{Aperture, Field, Object, Surface, Wavelength},
+    system::{Aperture, Field, Object, Surface, Vignette, Wavelength},
     trace, Material, Paraxial, System,
 };
 use serde::{Deserialize, Serialize};
@@ -87,17 +87,44 @@ impl SolveSpec {
 }
 
 /// A field point, with both transverse components named as a prescription names them.
+///
+/// The five vignetting factors say how much of the pupil this field actually uses. All
+/// zero, the default, means the whole pupil, so a spec written before they existed still
+/// means exactly what it meant.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct FieldSpec {
     #[serde(default)]
     pub x: f64,
     #[serde(default)]
     pub y: f64,
+    /// Pupil decentre, in normalised pupil coordinates.
+    #[serde(default)]
+    pub vdx: f64,
+    #[serde(default)]
+    pub vdy: f64,
+    /// Pupil compression: 0 keeps the full width, 0.5 keeps half of it.
+    #[serde(default)]
+    pub vcx: f64,
+    #[serde(default)]
+    pub vcy: f64,
+    /// Rotation of the vignetted pupil, in degrees.
+    #[serde(default)]
+    pub van: f64,
 }
 
 impl FieldSpec {
     pub fn radius(&self) -> f64 {
         (self.x * self.x + self.y * self.y).sqrt()
+    }
+
+    fn vignette(&self) -> Vignette {
+        Vignette {
+            dx: self.vdx,
+            dy: self.vdy,
+            cx: self.vcx,
+            cy: self.vcy,
+            angle: self.van,
+        }
     }
 }
 
@@ -354,7 +381,7 @@ impl SystemSpec {
             .with_fields(
                 self.fields
                     .iter()
-                    .map(|f| Field::Angle { x: f.x, y: f.y })
+                    .map(|f| Field::angle_xy(f.x, f.y).vignetted(f.vignette()))
                     .collect(),
             )
             .with_wavelengths(
@@ -601,9 +628,12 @@ pub fn analyze(request: &Request) -> Result<Analysis, String> {
             let want = par_w.image_point(&sys, *w, *field);
             let reference = (want[0] * want[0] + want[1] * want[1]).sqrt();
             if reference > 1e-9 {
-                if let Some(p) =
-                    trace(&sys, *w, launch(&sys, &par_w, *field, 0.0, 0.0)).image_point()
-                {
+                // Deliberately the *unvignetted* chief ray. Vignetting says which rays
+                // we choose to sample, and distortion is a property of the lens: if a
+                // decentred pupil could move it, the figure would describe our sampling
+                // rather than the design.
+                let chief = launch(&sys, &par_w, field.unvignetted(), 0.0, 0.0);
+                if let Some(p) = trace(&sys, *w, chief).image_point() {
                     let real = (p.x * want[0] + p.y * want[1]) / reference;
                     distortion.push(DistortionPoint {
                         field_index: fi,
@@ -842,8 +872,20 @@ fn spec_of(sys: &System<f64>) -> SystemSpec {
         fields: sys
             .fields
             .iter()
-            .map(|f| match *f {
-                Field::Angle { x, y } | Field::Height { x, y } => FieldSpec { x, y },
+            .map(|f| {
+                let v = f.vignette();
+                let (x, y) = match *f {
+                    Field::Angle { x, y, .. } | Field::Height { x, y, .. } => (x, y),
+                };
+                FieldSpec {
+                    x,
+                    y,
+                    vdx: v.dx,
+                    vdy: v.dy,
+                    vcx: v.cx,
+                    vcy: v.cy,
+                    van: v.angle,
+                }
             })
             .collect(),
         surfaces,
@@ -1296,7 +1338,7 @@ mod tests {
     }
 
     #[test]
-    fn import_reports_what_it_could_not_honour() {
+    fn import_carries_vignetting_factors_onto_the_field() {
         let zmx = "VERS 1\nMODE SEQ\nNAME t\nENPD 10\nFTYP 0 0 1 1 0 0 0 1\nXFLN 0\nYFLN 0\n\
                    WAVM 1 0.5876 1\nVDYN 0.3\nSURF 0\n  TYPE STANDARD\n  CURV 0\n  DISZ INFINITY\n\
                    SURF 1\n  TYPE STANDARD\n  CURV 0.01\n  DISZ 5\n  GLAS N-BK7 0 0 1.5168 64.17\n  STOP\n\
@@ -1305,13 +1347,52 @@ mod tests {
         let out: serde_json::Value =
             serde_json::from_str(&import_zmx_json(zmx.as_bytes())).unwrap();
         assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["system"]["fields"][0]["vdy"], 0.3, "{out}");
+
+        // They are honoured now, so nothing should be reported as unsupported.
         let warnings = out["warnings"].as_array().unwrap();
         assert!(
-            warnings
+            !warnings
                 .iter()
                 .any(|w| w.as_str().unwrap().contains("vignetting")),
             "{warnings:?}"
         );
+    }
+
+    #[test]
+    fn vignetting_shrinks_the_spot_without_moving_the_distortion() {
+        // The two halves of the promise. Sampling less of the pupil must drop the rays
+        // that carry the most aberration, so the spot shrinks. Distortion is a chief-ray
+        // property, so it must not move at all -- which is what lets an outer-field
+        // distortion figure be compared against Zemax even when the vignetting settings
+        // are not yet known to match.
+        let mut spec = cooke();
+        let wide = spec.fields.len() - 1;
+
+        let before = run(spec.clone());
+        spec.fields[wide].vcy = 0.5;
+        spec.fields[wide].vcx = 0.5;
+        let after = run(spec);
+
+        assert!(
+            after.spots[wide].rms < before.spots[wide].rms * 0.9,
+            "{} against {}",
+            after.spots[wide].rms,
+            before.spots[wide].rms
+        );
+        assert!(
+            (after.spots[0].rms - before.spots[0].rms).abs() < 1e-12,
+            "an unvignetted field was disturbed"
+        );
+
+        for (a, b) in after.distortion.iter().zip(&before.distortion) {
+            assert!(
+                (a.percent - b.percent).abs() < 1e-12,
+                "distortion moved: {} against {}",
+                a.percent,
+                b.percent
+            );
+        }
     }
 
     #[test]

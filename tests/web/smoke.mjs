@@ -294,5 +294,64 @@ for (const unit of exported.text) {
 check("UTF-16 files are handled", engine.importZmx(new Uint8Array(utf16)).ok);
 check("junk is refused politely", engine.importZmx(new TextEncoder().encode("hello")).ok === false);
 
+// Vignetting factors. They arrive silently with a file, so the page has to show them,
+// and editing an unrelated number must not throw them away.
+check(
+  "an unvignetted design shows no vignetting table",
+  doc.getElementById("vignetting").hidden,
+);
+
+const vignetted = engine.importZmx(
+  new TextEncoder().encode(exported.text.replace(/^VCYN .*$/m, "VCYN 0 0 0.5")),
+);
+check("a file with vignetting factors imports", vignetted.ok, vignetted.error ?? "");
+if (vignetted.ok) {
+  const last = vignetted.system.fields.length - 1;
+  check(
+    "the factor lands on the field it belongs to",
+    vignetted.system.fields[last].vcy === 0.5 && vignetted.system.fields[0].vcy === 0,
+    JSON.stringify(vignetted.system.fields),
+  );
+
+  const open = engine.analyze({ system: vignetted.system, rays_per_fan: 5, spot_grid: 15 });
+  const full = engine.analyze({
+    system: { ...vignetted.system, fields: vignetted.system.fields.map((f) => ({ ...f, vcy: 0 })) },
+    rays_per_fan: 5,
+    spot_grid: 15,
+  });
+  check(
+    "vignetting shrinks the outer spot",
+    open.spots[last].rms < full.spots[last].rms,
+    `${open.spots[last].rms} against ${full.spots[last].rms}`,
+  );
+  check(
+    "and leaves distortion where it was",
+    open.distortion.every(
+      (d, i) => Math.abs(d.percent - full.distortion[i].percent) < 1e-12,
+    ),
+  );
+}
+
+// Retyping the field list must keep the factors: they are part of the prescription.
+app.state.spec.fields = app.state.spec.fields.map((f, i) => ({ ...f, vcy: i === 0 ? 0 : 0.4 }));
+const fieldsInput = doc.getElementById("fields");
+fieldsInput.value = "0, 7, 14";
+fieldsInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+await settle();
+check(
+  "retyping the field angles keeps the vignetting factors",
+  app.state.spec.fields[1].vcy === 0.4 && app.state.spec.fields[1].y === 7,
+  JSON.stringify(app.state.spec.fields),
+);
+check(
+  "a field that did not exist before starts on the full pupil",
+  app.state.spec.fields[2].vcy === 0 && app.state.spec.fields[2].y === 14,
+  JSON.stringify(app.state.spec.fields),
+);
+check(
+  "and the vignetting table appears once they are in force",
+  !doc.getElementById("vignetting").hidden,
+);
+
 console.log(`\n${failures === 0 ? "all checks passed" : `${failures} check(s) failed`}\n`);
 process.exit(failures === 0 ? 0 : 1);

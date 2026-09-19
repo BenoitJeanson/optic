@@ -110,29 +110,149 @@ impl Wavelength {
     }
 }
 
+/// How much of the pupil a field point actually uses.
+///
+/// A real lens loses light at the edge of the field to mounts, barrels and the rims of
+/// its own elements. Modelling every one of those is possible but tedious, so the trade
+/// is to describe the surviving beam directly: shrink and shift the pupil per field
+/// until it matches the light that gets through. Zemax calls the five numbers vignetting
+/// factors and applies them to the normalised pupil coordinates before launching a ray,
+/// which is what we do here.
+///
+/// All zero means the whole pupil, and is the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Vignette {
+    /// Pupil decentre in x, in normalised pupil coordinates.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dx: f64,
+    /// Pupil decentre in y.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dy: f64,
+    /// Pupil compression in x: 0 keeps the full width, 0.5 keeps half of it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub cx: f64,
+    /// Pupil compression in y.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub cy: f64,
+    /// Rotation of the vignetted pupil, in degrees.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub angle: f64,
+}
+
+impl Vignette {
+    /// The whole pupil: no decentre, no compression, no rotation.
+    pub const NONE: Vignette = Vignette {
+        dx: 0.0,
+        dy: 0.0,
+        cx: 0.0,
+        cy: 0.0,
+        angle: 0.0,
+    };
+
+    /// Whether this field uses the pupil in full.
+    pub fn is_full(&self) -> bool {
+        *self == Vignette::NONE
+    }
+
+    /// Map a point on the full pupil onto the part of it this field actually uses.
+    ///
+    /// Compress and decentre in x and y, then rotate: the order Zemax applies, and the
+    /// order that makes the rotation act on the vignetted pupil rather than on the
+    /// full one.
+    pub fn apply(&self, px: f64, py: f64) -> (f64, f64) {
+        let x = self.dx + px * (1.0 - self.cx);
+        let y = self.dy + py * (1.0 - self.cy);
+        if self.angle == 0.0 {
+            return (x, y);
+        }
+        let (s, c) = self.angle.to_radians().sin_cos();
+        (x * c - y * s, x * s + y * c)
+    }
+}
+
 /// One field point.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(tag = "kind", rename_all = "snake_case"))]
 pub enum Field {
     /// Incidence angle in degrees. Only meaningful for an object at infinity.
-    Angle { x: f64, y: f64 },
+    Angle {
+        x: f64,
+        y: f64,
+        #[cfg_attr(feature = "serde", serde(default))]
+        vignette: Vignette,
+    },
     /// Object height in lens units. Only meaningful for a finite object.
-    Height { x: f64, y: f64 },
+    Height {
+        x: f64,
+        y: f64,
+        #[cfg_attr(feature = "serde", serde(default))]
+        vignette: Vignette,
+    },
 }
 
 impl Field {
     pub fn angle(y: f64) -> Self {
-        Field::Angle { x: 0.0, y }
+        Field::Angle {
+            x: 0.0,
+            y,
+            vignette: Vignette::NONE,
+        }
     }
     pub fn height(y: f64) -> Self {
-        Field::Height { x: 0.0, y }
+        Field::Height {
+            x: 0.0,
+            y,
+            vignette: Vignette::NONE,
+        }
+    }
+
+    /// A field angle off the meridional plane.
+    pub fn angle_xy(x: f64, y: f64) -> Self {
+        Field::Angle {
+            x,
+            y,
+            vignette: Vignette::NONE,
+        }
+    }
+
+    /// An object height off the meridional plane.
+    pub fn height_xy(x: f64, y: f64) -> Self {
+        Field::Height {
+            x,
+            y,
+            vignette: Vignette::NONE,
+        }
+    }
+
+    /// This field point with vignetting factors attached.
+    pub fn vignetted(self, v: Vignette) -> Self {
+        match self {
+            Field::Angle { x, y, .. } => Field::Angle { x, y, vignette: v },
+            Field::Height { x, y, .. } => Field::Height { x, y, vignette: v },
+        }
+    }
+
+    /// This field point using the whole pupil.
+    ///
+    /// Anything that must not depend on how the pupil is sampled asks for this — the
+    /// chief ray behind a distortion figure, most of all.
+    pub fn unvignetted(self) -> Self {
+        self.vignetted(Vignette::NONE)
+    }
+
+    /// The part of the pupil this field uses.
+    pub fn vignette(&self) -> Vignette {
+        match *self {
+            Field::Angle { vignette, .. } | Field::Height { vignette, .. } => vignette,
+        }
     }
 
     /// Distance of this field point from the axis, in its own units.
     pub fn radius(&self) -> f64 {
         match *self {
-            Field::Angle { x, y } | Field::Height { x, y } => (x * x + y * y).sqrt(),
+            Field::Angle { x, y, .. } | Field::Height { x, y, .. } => (x * x + y * y).sqrt(),
         }
     }
 
@@ -145,7 +265,7 @@ impl Field {
     /// reports `(0, 0)`, so anything scaled by it lands on the axis where it belongs.
     pub fn direction(&self) -> (f64, f64) {
         match *self {
-            Field::Angle { x, y } | Field::Height { x, y } => {
+            Field::Angle { x, y, .. } | Field::Height { x, y, .. } => {
                 let r = (x * x + y * y).sqrt();
                 if r == 0.0 {
                     (0.0, 0.0)
@@ -376,18 +496,71 @@ mod tests {
 
     #[test]
     fn field_radius_is_measured_from_the_axis() {
-        assert_eq!(Field::Angle { x: 3.0, y: 4.0 }.radius(), 5.0);
-        assert_eq!(Field::Height { x: -3.0, y: 4.0 }.radius(), 5.0);
+        assert_eq!(Field::angle_xy(3.0, 4.0).radius(), 5.0);
+        assert_eq!(Field::height_xy(-3.0, 4.0).radius(), 5.0);
         assert_eq!(Field::angle(7.0).radius(), 7.0);
         assert_eq!(Field::height(0.0).radius(), 0.0);
     }
 
     #[test]
+    fn the_full_pupil_is_the_default_and_changes_nothing() {
+        let v = Vignette::default();
+        assert!(v.is_full());
+        assert_eq!(v.apply(0.7, -0.3), (0.7, -0.3));
+        assert!(Field::angle(5.0).vignette().is_full());
+    }
+
+    #[test]
+    fn compression_shrinks_the_pupil_and_decentre_moves_it() {
+        let squeezed = Vignette {
+            cy: 0.5,
+            ..Vignette::NONE
+        };
+        assert_eq!(squeezed.apply(1.0, 1.0), (1.0, 0.5));
+
+        // A decentred pupil takes its centre with it, which is the whole point: the ray
+        // at (0, 0) is the one analyses call the chief ray.
+        let shifted = Vignette {
+            dy: 0.25,
+            ..Vignette::NONE
+        };
+        assert_eq!(shifted.apply(0.0, 0.0), (0.0, 0.25));
+        assert_eq!(shifted.apply(0.0, 1.0), (0.0, 1.25));
+    }
+
+    #[test]
+    fn the_vignetting_angle_turns_the_reduced_pupil_not_the_full_one() {
+        // Squeeze in y, then turn a quarter turn: the squeeze must end up in x.
+        let v = Vignette {
+            cy: 0.5,
+            angle: 90.0,
+            ..Vignette::NONE
+        };
+        let (x, y) = v.apply(0.0, 1.0);
+        assert!((x + 0.5).abs() < 1e-15 && y.abs() < 1e-15, "({x}, {y})");
+        let (x, y) = v.apply(1.0, 0.0);
+        assert!(x.abs() < 1e-15 && (y - 1.0).abs() < 1e-15, "({x}, {y})");
+    }
+
+    #[test]
+    fn a_field_carries_its_vignetting_and_can_be_stripped_of_it() {
+        let v = Vignette {
+            cx: 0.3,
+            dy: -0.2,
+            ..Vignette::NONE
+        };
+        let f = Field::angle(12.0).vignetted(v);
+        assert_eq!(f.vignette(), v);
+        assert_eq!(f.radius(), 12.0);
+        assert_eq!(f.unvignetted(), Field::angle(12.0));
+    }
+
+    #[test]
     fn field_direction_separates_what_radius_merges() {
-        assert_eq!(Field::Angle { x: 3.0, y: 4.0 }.direction(), (0.6, 0.8));
+        assert_eq!(Field::angle_xy(3.0, 4.0).direction(), (0.6, 0.8));
         assert_eq!(Field::angle(7.0).direction(), (0.0, 1.0));
         assert_eq!(Field::angle(-7.0).direction(), (0.0, -1.0));
-        assert_eq!(Field::Angle { x: 7.0, y: 0.0 }.direction(), (1.0, 0.0));
+        assert_eq!(Field::angle_xy(7.0, 0.0).direction(), (1.0, 0.0));
 
         // The axis has no direction to report, and must not invent one.
         assert_eq!(Field::angle(0.0).direction(), (0.0, 0.0));
